@@ -55,6 +55,45 @@ public final class UnixSocketServer {
         listenFD = fd
     }
 
+    /// Block accepting connections; for each, verify the peer's uid (R33), read one
+    /// framed message, hand the payload to `handler`, then close. Runs until `stop()`.
+    /// Intended to run on a background thread.
+    public func acceptLoop(_ handler: @escaping (Data) -> Void) {
+        let myUID = UInt32(getuid())
+        while listenFD >= 0 {
+            let client = accept(listenFD, nil, nil)
+            if client < 0 { continue }
+            defer { close(client) }
+            if let euid = PeerCred.peerEUID(of: client),
+               PeerCred.isAuthorized(peerEUID: euid, daemonEUID: myUID),
+               let payload = readFrame(client) {
+                handler(payload)
+            }
+        }
+    }
+
+    private func readFrame(_ fd: Int32) -> Data? {
+        var lengthBytes = [UInt8](repeating: 0, count: 4)
+        guard readFully(fd, &lengthBytes, 4) else { return nil }
+        let length = FrameCodec.decodeLength(lengthBytes)
+        guard FrameCodec.isAcceptableLength(length), length > 0 else { return nil }
+        var payload = [UInt8](repeating: 0, count: length)
+        guard readFully(fd, &payload, length) else { return nil }
+        return Data(payload)
+    }
+
+    private func readFully(_ fd: Int32, _ buffer: inout [UInt8], _ count: Int) -> Bool {
+        var total = 0
+        while total < count {
+            let n = buffer.withUnsafeMutableBytes { raw -> Int in
+                read(fd, raw.baseAddress!.advanced(by: total), count - total)
+            }
+            if n <= 0 { return false }
+            total += n
+        }
+        return true
+    }
+
     public func stop() {
         if listenFD >= 0 { close(listenFD); listenFD = -1 }
         unlink(socketPath)

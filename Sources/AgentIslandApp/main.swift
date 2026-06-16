@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import AgentIslandCore
 import PersonaKit
+import AgentIslandDaemon
 
 // agent-island v0 app: a menu-bar (accessory) item plus an always-on-top floating
 // "island" panel. Both list your active Claude Code sessions and their derived state,
@@ -111,6 +112,28 @@ final class AppController: NSObject {
     // MARK: - Derivation from real transcripts
 
     private func activeSessions() -> [Session] {
+        daemonSessions() ?? polledSessions()
+    }
+
+    /// Event-driven: read the daemon's state.json when it's fresh (daemon running).
+    private func daemonSessions() -> [Session]? {
+        let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
+        guard let attrs = try? fm.attributesOfItem(atPath: statePath),
+              let mtime = attrs[.modificationDate] as? Date,
+              Date().timeIntervalSince(mtime) < 30,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+              let state = try? JSONDecoder().decode(DaemonState.self, from: data),
+              !state.sessions.isEmpty else { return nil }
+        return state.sessions.map { snap in
+            var subs: [AgentStatus] = Array(repeating: .working, count: snap.subActive)
+            subs += Array(repeating: .finished(.success), count: snap.subDone)
+            return Session(fullID: snap.sessionID, shortID: String(snap.sessionID.prefix(8)),
+                           status: AgentStatus(stateToken: snap.state), subStatuses: subs)
+        }
+    }
+
+    /// Fallback: poll ~/.claude transcripts directly when the daemon isn't running.
+    private func polledSessions() -> [Session] {
         guard let projects = try? fm.contentsOfDirectory(atPath: projectsDir) else { return [] }
         let cutoff = Date().addingTimeInterval(-activeWindow)
         var found: [(session: Session, mtime: Date)] = []

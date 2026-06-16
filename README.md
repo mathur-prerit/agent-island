@@ -32,11 +32,26 @@ brew install --HEAD agent-island
 agent-island
 ```
 
+## Event-driven mode (optional)
+
+By default the app polls your transcripts every few seconds. To switch to event-driven updates (lower overhead, instant), run the daemon and register the Claude Code hooks:
+
+```sh
+# 1. register hooks in ~/.claude/settings.json (safe: backup + atomic write; undo with `uninstall`)
+swift run AgentIslandHookCLI install
+
+# 2. run the daemon (or copy launchd/com.mathur-prerit.agentisland.plist into
+#    ~/Library/LaunchAgents/ — with the binary path filled in — to auto-start it)
+swift run agentislandd
+```
+
+With the daemon running, the app reads its `~/.agent-island/state.json` instead of polling; if the daemon isn't running, the app automatically falls back to polling.
+
 ## Build & test
 
 ```sh
 swift build
-swift run AgentIslandSelfTest   # framework-free self-test runner (65 checks)
+swift run AgentIslandSelfTest   # framework-free self-test runner (82 checks)
 swift run AgentIslandDemo       # the engine on your real ~/.claude transcripts
 ```
 

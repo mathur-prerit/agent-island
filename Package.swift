@@ -18,17 +18,21 @@ let package = Package(
         .executable(name: "AgentIslandApp", targets: ["AgentIslandApp"]),
         // The hook bridge Claude Code invokes: install/uninstall hooks + relay events.
         .executable(name: "AgentIslandHookCLI", targets: ["AgentIslandHookCLI"]),
+        // The background daemon: receives hook events over a Unix socket, maintains
+        // session state, and writes ~/.agent-island/state.json for the app to read.
+        .executable(name: "agentislandd", targets: ["agentislandd"]),
     ],
     targets: [
         .target(name: "AgentIslandCore"),
         .target(name: "PersonaKit", dependencies: ["AgentIslandCore"]),
         .target(name: "HookInstall"),
-        .target(name: "AgentIslandDaemon"),
+        .target(name: "AgentIslandDaemon", dependencies: ["AgentIslandCore"]),
         .executableTarget(
             name: "AgentIslandSelfTest",
             dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
-        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit"]),
+        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon"]),
         .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
+        .executableTarget(name: "agentislandd", dependencies: ["AgentIslandDaemon", "AgentIslandCore"]),
     ]
 )
