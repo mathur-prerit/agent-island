@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "AgentIslandCore", targets: ["AgentIslandCore"]),
         .library(name: "PersonaKit", targets: ["PersonaKit"]),
         .library(name: "HookInstall", targets: ["HookInstall"]),
+        .library(name: "AgentIslandDaemon", targets: ["AgentIslandDaemon"]),
         // Framework-free test runner — runs under Command Line Tools (no full Xcode /
         // XCTest / swift-testing needed). `swift run AgentIslandSelfTest`.
         .executable(name: "AgentIslandSelfTest", targets: ["AgentIslandSelfTest"]),
@@ -18,8 +19,9 @@ let package = Package(
         .target(name: "AgentIslandCore"),
         .target(name: "PersonaKit"),
         .target(name: "HookInstall"),
+        .target(name: "AgentIslandDaemon"),
         .executableTarget(
             name: "AgentIslandSelfTest",
-            dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall"]),
+            dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
     ]
 )

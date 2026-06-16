@@ -1,7 +1,9 @@
 import Foundation
+import Darwin
 import AgentIslandCore
 import PersonaKit
 import HookInstall
+import AgentIslandDaemon
 
 // Framework-free self-test. Runs under Command Line Tools (no Xcode/XCTest/Testing).
 // `swift run AgentIslandSelfTest` — exits non-zero on any failure (usable in CI).
@@ -112,6 +114,20 @@ check(d3 != nil && ourEntryCount(d3!, event: "Stop", command: cmd) == 1, "U4: ou
 let stopEntries = ((root3?["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]]) ?? []
 let hasOther = stopEntries.contains { ($0["hooks"] as? [[String: Any]])?.contains { ($0["command"] as? String) == "/other/tool" } ?? false }
 check(hasOther, "U4: existing third-party hook preserved")
+
+// --- Daemon IPC (U3) ---
+check(FrameCodec.isAcceptableLength(0), "frame length 0 acceptable")
+check(FrameCodec.isAcceptableLength(FrameCodec.maxMessageBytes), "frame length at 64KB cap acceptable")
+check(!FrameCodec.isAcceptableLength(FrameCodec.maxMessageBytes + 1), "frame over 64KB cap rejected")
+check(!FrameCodec.isAcceptableLength(-1), "negative frame length rejected")
+let enc = FrameCodec.encode(Data("hello".utf8))
+check(enc.count == 4 + 5, "encoded frame = 4-byte prefix + payload")
+check(FrameCodec.decodeLength(Array(enc.prefix(4))) == 5, "length prefix decodes to payload size")
+let payload = Data(#"{"type":"Stop","session_id":"s1"}"#.utf8)
+check(SocketRoundTrip.loopback(payload) == payload, "U3: framed message round-trips over a real AF_UNIX socketpair")
+let myUID = UInt32(getuid())
+check(PeerCred.isAuthorized(peerEUID: myUID, daemonEUID: myUID), "same-uid peer authorized")
+check(!PeerCred.isAuthorized(peerEUID: myUID &+ 1, daemonEUID: myUID), "different-uid peer rejected")
 
 print("")
 if failures == 0 {
