@@ -26,7 +26,7 @@ final class AppController: NSObject {
     private let activeWindow: TimeInterval = 600  // a session touched within 10 min is "active"
     private let pool = BuiltInPersonas.all
 
-    private struct Session { let fullID: String; let shortID: String; let status: AgentStatus }
+    private struct Session { let fullID: String; let shortID: String; let status: AgentStatus; let subStatuses: [AgentStatus] }
 
     func start() {
         statusItem.button?.title = "○"
@@ -70,13 +70,19 @@ final class AppController: NSObject {
 
         // Floating island
         if islandEnabled && !sessions.isEmpty {
-            let rows = sessions.map {
-                IslandPanel.Row(glyph: persona(for: $0).skin(for: $0.status).glyph,
-                                color: color($0.status),
-                                text: rowText(for: $0, includeGlyph: false))
+            let rows = sessions.map { s -> IslandPanel.Row in
+                let skin = persona(for: s).skin(for: s.status)
+                let subRows = s.subStatuses.map {
+                    IslandPanel.SubRow(glyph: "↳", color: color($0), text: subDescribe($0))
+                }
+                return IslandPanel.Row(glyph: skin.glyph,
+                                       color: color(s.status),
+                                       text: "\(s.shortID)  —  \(skin.label)",
+                                       pulsing: isWaiting(s.status),
+                                       dimmed: isFinished(s.status),
+                                       subRows: subRows)
             }
             island.update(rows: rows)
-            layoutIsland(rowCount: rows.count)
             island.orderFrontRegardless()
         } else {
             island.orderOut(nil)
@@ -91,16 +97,6 @@ final class AppController: NSObject {
 
     private func persona(for s: Session) -> Persona {
         PersonaRuntime.persona(forSessionID: s.fullID, pool: pool) ?? BuiltInPersonas.minimal
-    }
-
-    private func layoutIsland(rowCount: Int) {
-        let width: CGFloat = 340
-        let height = CGFloat(12 + (rowCount + 1) * 20 + 12)  // header row + N session rows + insets
-        var frame = NSRect(x: 0, y: 0, width: width, height: height)
-        if let visible = NSScreen.main?.visibleFrame {
-            frame.origin = NSPoint(x: visible.maxX - width - 16, y: visible.maxY - height - 16)
-        }
-        island.setFrame(frame, display: true)
     }
 
     private func infoItem(_ title: String) -> NSMenuItem {
@@ -129,9 +125,10 @@ final class AppController: NSObject {
                 guard mtime >= cutoff else { continue }
                 let records = TranscriptAdapter.parse(lines: readLines(p))
                 let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
-                let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subAgentStatuses(forSession: p))
+                let subs = subAgentStatuses(forSession: p)
+                let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
-                found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)), status: rolled), mtime))
+                found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)), status: rolled, subStatuses: subs), mtime))
             }
         }
         return found.sorted { $0.mtime > $1.mtime }.map(\.session)
@@ -157,6 +154,19 @@ final class AppController: NSObject {
 
     private func isWaiting(_ s: AgentStatus) -> Bool {
         if case .waitingForInput = s { return true } else { return false }
+    }
+
+    private func isFinished(_ s: AgentStatus) -> Bool {
+        if case .finished = s { return true } else { return false }
+    }
+
+    private func subDescribe(_ s: AgentStatus) -> String {
+        switch s {
+        case .working: return "sub-agent · working"
+        case .waitingForInput: return "sub-agent · waiting"
+        case .finished(.failed): return "sub-agent · failed"
+        case .finished: return "sub-agent · done"
+        }
     }
 
     private func color(_ s: AgentStatus) -> NSColor {
