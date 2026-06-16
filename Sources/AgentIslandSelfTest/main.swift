@@ -1,5 +1,6 @@
 import Foundation
 import AgentIslandCore
+import PersonaKit
 
 // Framework-free self-test. Runs under Command Line Tools (no Xcode/XCTest/Testing).
 // `swift run AgentIslandSelfTest` — exits non-zero on any failure (usable in CI).
@@ -64,6 +65,20 @@ check(AutoClose.closesWaiting(eventSessionId: "s1", eventType: "SessionEnd", wai
 check(!AutoClose.closesWaiting(eventSessionId: "s1", eventType: "Stop", waitingSessionId: "s1"), "Stop does not close WAITING")
 check(AutoClose.isStale(lastEventElapsed: 600, timeout: 300), "ungraceful-quit staleness expires the strip")
 check(!AutoClose.isStale(lastEventElapsed: 100, timeout: 300), "recent session is not stale")
+
+// --- PersonaKit pack validation (U11, security acceptance criteria) ---
+check(PackValidator.validateAssetPath("icons/done.png") == nil, "valid relative asset path ok")
+check(PackValidator.validateAssetPath("../escape.png") == .pathTraversal("../escape.png"), "Zip-Slip: ../ path rejected")
+check(PackValidator.validateAssetPath("/etc/passwd") == .pathTraversal("/etc/passwd"), "absolute asset path rejected")
+check(PackValidator.validateAsset("evil.svg") == .disallowedAsset("evil.svg"), "SVG disallowed by allowlist")
+check(PackValidator.validateAsset("done.png") == nil, "png asset allowed")
+check(PackValidator.checkLimits(archiveBytes: 1_000, uncompressedBytes: 2_000_000, fileCount: 5, largestFileBytes: 1_000) == .compressionBomb, "zip bomb (ratio) rejected")
+check(PackValidator.checkLimits(archiveBytes: 20 * 1024 * 1024, uncompressedBytes: 30 * 1024 * 1024, fileCount: 5, largestFileBytes: 1_000) == .archiveTooLarge, "oversized archive rejected")
+check(PackValidator.checkLimits(archiveBytes: 1_000, uncompressedBytes: 2_000, fileCount: 5, largestFileBytes: 500) == nil, "pack within limits ok")
+check(PackValidator.validateManifestKeys(["name", "version", "slots", "exec"]) == .unknownSchemaField("exec"), "unknown manifest field (e.g. exec) rejected")
+check(PackValidator.validateManifestKeys(["name", "version", "slots", "copy"]) == nil, "known manifest fields ok")
+check(PackValidator.validateSlotKeys(["working", "finished", "totallyNewState"]) == .unknownState("totallyNewState"), "pack cannot introduce a new state slot")
+check(PackValidator.validateSlotKeys(["working", "waitingForInput", "finished"]) == nil, "canonical slots ok")
 
 print("")
 if failures == 0 {
