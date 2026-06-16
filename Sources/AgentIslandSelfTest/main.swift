@@ -1,6 +1,7 @@
 import Foundation
 import AgentIslandCore
 import PersonaKit
+import HookInstall
 
 // Framework-free self-test. Runs under Command Line Tools (no Xcode/XCTest/Testing).
 // `swift run AgentIslandSelfTest` — exits non-zero on any failure (usable in CI).
@@ -79,6 +80,38 @@ check(PackValidator.validateManifestKeys(["name", "version", "slots", "exec"]) =
 check(PackValidator.validateManifestKeys(["name", "version", "slots", "copy"]) == nil, "known manifest fields ok")
 check(PackValidator.validateSlotKeys(["working", "finished", "totallyNewState"]) == .unknownState("totallyNewState"), "pack cannot introduce a new state slot")
 check(PackValidator.validateSlotKeys(["working", "waitingForInput", "finished"]) == nil, "canonical slots ok")
+
+// --- Hook installer safe-merge (U4) ---
+func ourEntryCount(_ data: Data, event: String, command: String) -> Int {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let hooks = root["hooks"] as? [String: Any],
+          let entries = hooks[event] as? [[String: Any]] else { return -1 }
+    return entries.filter { e in
+        (e["hooks"] as? [[String: Any]])?.contains { ($0["command"] as? String) == command } ?? false
+    }.count
+}
+func installed(_ existing: Data, _ cmd: String, _ events: [String]) -> Data? {
+    if case .success(let d) = SettingsMerge.install(existing: existing, command: cmd, events: events) { return d }
+    return nil
+}
+func abortsOnInvalid() -> Bool {
+    if case .failure(.invalidJSON) = SettingsMerge.install(existing: Data("not json".utf8), command: "x", events: ["Stop"]) { return true }
+    return false
+}
+let cmd = "/usr/local/bin/agentisland hook"
+check(abortsOnInvalid(), "U4: malformed settings.json -> abort, do not overwrite")
+let d1 = installed(Data(), cmd, ["Stop", "UserPromptSubmit"])
+check(d1 != nil && ourEntryCount(d1!, event: "Stop", command: cmd) == 1, "U4: hook added for Stop")
+let d2 = d1.flatMap { installed($0, cmd, ["Stop", "UserPromptSubmit"]) }
+check(d2 != nil && ourEntryCount(d2!, event: "Stop", command: cmd) == 1, "U4: re-install is idempotent (no duplicate)")
+let existingSettings = Data(#"{"otherKey":42,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/other/tool"}]}]}}"#.utf8)
+let d3 = installed(existingSettings, cmd, ["Stop"])
+let root3 = d3.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+check((root3?["otherKey"] as? Int) == 42, "U4: unknown top-level keys preserved")
+check(d3 != nil && ourEntryCount(d3!, event: "Stop", command: cmd) == 1, "U4: our entry added alongside existing")
+let stopEntries = ((root3?["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]]) ?? []
+let hasOther = stopEntries.contains { ($0["hooks"] as? [[String: Any]])?.contains { ($0["command"] as? String) == "/other/tool" } ?? false }
+check(hasOther, "U4: existing third-party hook preserved")
 
 print("")
 if failures == 0 {
