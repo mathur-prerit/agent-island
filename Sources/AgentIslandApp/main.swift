@@ -2,20 +2,23 @@ import AppKit
 import Foundation
 import AgentIslandCore
 
-// agent-island v0 menu-bar app: a status-bar item whose dropdown lists your active
-// Claude Code sessions and their derived state, polled from ~/.claude transcripts via
-// the verified AgentIslandCore. Runs as a plain SwiftPM executable (a menu-bar accessory
-// needs no .app bundle to appear):
+// agent-island v0 app: a menu-bar (accessory) item plus an always-on-top floating
+// "island" panel. Both list your active Claude Code sessions and their derived state,
+// polled from ~/.claude transcripts via the verified AgentIslandCore. Runs as a plain
+// SwiftPM executable:
 //
 //   swift run AgentIslandApp          # or pick the AgentIslandApp scheme in Xcode and Run
 //
-// Quit from the menu (or ⌘Q). Polling is a v0 shortcut — the daemon + hooks (built but
-// not yet wired) will replace it for event-driven, lower-overhead updates.
+// The island appears (top-right) only while sessions are active; toggle it or quit from
+// the menu-bar item. Polling is a v0 shortcut — the daemon + hooks (built, not yet
+// wired) will replace it with event-driven updates.
 
 final class AppController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
+    private let island = IslandPanel()
     private var timer: Timer?
+    private var islandEnabled = true
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -37,8 +40,9 @@ final class AppController: NSObject {
 
     private func refresh() {
         let sessions = activeSessions()
-        menu.removeAllItems()
 
+        // Menu-bar dropdown
+        menu.removeAllItems()
         if sessions.isEmpty {
             menu.addItem(infoItem("No active Claude Code sessions"))
         } else {
@@ -48,14 +52,44 @@ final class AppController: NSObject {
             }
         }
         menu.addItem(.separator())
+        let toggle = NSMenuItem(title: "Show floating island", action: #selector(toggleIsland), keyEquivalent: "")
+        toggle.target = self
+        toggle.isEnabled = true
+        toggle.state = islandEnabled ? .on : .off
+        menu.addItem(toggle)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agent-island", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         quit.isEnabled = true
         menu.addItem(quit)
 
+        // Menu-bar glyph reflects the most-urgent state.
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
         statusItem.button?.title = waiting > 0 ? "● \(waiting)" : (working ? "◐" : "○")
+
+        // Floating island — shown only when enabled and there is something to show.
+        if islandEnabled && !sessions.isEmpty {
+            let rows = sessions.map {
+                IslandPanel.Row(glyph: glyph($0.status), color: color($0.status),
+                                text: "\($0.id)  —  \(describe($0.status))")
+            }
+            island.update(rows: rows)
+            layoutIsland(rowCount: rows.count)
+            island.orderFrontRegardless()
+        } else {
+            island.orderOut(nil)
+        }
+    }
+
+    private func layoutIsland(rowCount: Int) {
+        let width: CGFloat = 320
+        let height = CGFloat(24 + 12 + (rowCount + 1) * 20 + 12)  // header row + N rows + insets
+        var frame = NSRect(x: 0, y: 0, width: width, height: height)
+        if let visible = NSScreen.main?.visibleFrame {
+            frame.origin = NSPoint(x: visible.maxX - width - 16, y: visible.maxY - height - 16)
+        }
+        island.setFrame(frame, display: true)
     }
 
     private func infoItem(_ title: String) -> NSMenuItem {
@@ -65,6 +99,7 @@ final class AppController: NSObject {
     }
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
+    @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
 
     // MARK: - Derivation from real transcripts
 
@@ -119,6 +154,15 @@ final class AppController: NSObject {
         case .waitingForInput: return "●"
         case .finished(.failed): return "✗"
         case .finished: return "✓"
+        }
+    }
+
+    private func color(_ s: AgentStatus) -> NSColor {
+        switch s {
+        case .working: return .systemYellow
+        case .waitingForInput: return .systemRed
+        case .finished(.failed): return .systemRed
+        case .finished: return .systemGreen
         }
     }
 
