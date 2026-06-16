@@ -12,6 +12,9 @@ let package = Package(
         // Framework-free test runner — runs under Command Line Tools (no full Xcode /
         // XCTest / swift-testing needed). `swift run AgentIslandSelfTest`.
         .executable(name: "AgentIslandSelfTest", targets: ["AgentIslandSelfTest"]),
+        // Tiny demo: runs the verified engine against your real ~/.claude transcripts.
+        // `swift run AgentIslandDemo [path-to-session.jsonl]`.
+        .executable(name: "AgentIslandDemo", targets: ["AgentIslandDemo"]),
     ],
     targets: [
         // Pure, headless logic. The AppKit app (NSPanel island, strips) lives under
@@ -23,5 +26,6 @@ let package = Package(
         .executableTarget(
             name: "AgentIslandSelfTest",
             dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
+        .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
     ]
 )
