@@ -129,6 +129,24 @@ let myUID = UInt32(getuid())
 check(PeerCred.isAuthorized(peerEUID: myUID, daemonEUID: myUID), "same-uid peer authorized")
 check(!PeerCred.isAuthorized(peerEUID: myUID &+ 1, daemonEUID: myUID), "different-uid peer rejected")
 
+// --- Personas (U12) ---
+check(BuiltInPersonas.all.count >= 3, "ships >=3 built-in personas")
+let personaA = PersonaRuntime.persona(forSessionID: "session-abc", pool: BuiltInPersonas.all)
+let personaB = PersonaRuntime.persona(forSessionID: "session-abc", pool: BuiltInPersonas.all)
+check(personaA != nil && personaA == personaB, "persona is stable per session id (session-locked, no storage)")
+check(PersonaRuntime.persona(forSessionID: "x", pool: []) == nil, "empty pool -> nil persona")
+let personaStates: [AgentStatus] = [.working, .waitingForInput(.stoppedTurn), .waitingForInput(.permission), .finished(.success), .finished(.failed)]
+var allSkinned = true
+for persona in BuiltInPersonas.all {
+    for st in personaStates {
+        let sk = persona.skin(for: st)
+        if sk.glyph.isEmpty || sk.label.isEmpty { allSkinned = false }
+    }
+}
+check(allSkinned, "every persona has a glyph + label for all states")
+let personasChosen = Set((0..<50).map { PersonaRuntime.persona(forSessionID: "s\($0)", pool: BuiltInPersonas.all)?.name ?? "" })
+check(personasChosen.count >= 2, "different sessions get different personas")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")

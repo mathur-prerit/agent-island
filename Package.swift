@@ -14,19 +14,18 @@ let package = Package(
         .executable(name: "AgentIslandSelfTest", targets: ["AgentIslandSelfTest"]),
         // Runs the verified engine against your real ~/.claude transcripts (console).
         .executable(name: "AgentIslandDemo", targets: ["AgentIslandDemo"]),
-        // The visible widget: a menu-bar (accessory) app. Runs as a plain executable —
-        // `swift run AgentIslandApp`, or select the AgentIslandApp scheme in Xcode.
+        // The visible widget: menu-bar item + floating island. Plain SwiftPM executable.
         .executable(name: "AgentIslandApp", targets: ["AgentIslandApp"]),
     ],
     targets: [
         .target(name: "AgentIslandCore"),
-        .target(name: "PersonaKit"),
+        .target(name: "PersonaKit", dependencies: ["AgentIslandCore"]),
         .target(name: "HookInstall"),
         .target(name: "AgentIslandDaemon"),
         .executableTarget(
             name: "AgentIslandSelfTest",
             dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
-        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore"]),
+        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit"]),
     ]
 )

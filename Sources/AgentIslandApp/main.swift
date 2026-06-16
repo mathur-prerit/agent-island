@@ -1,17 +1,18 @@
 import AppKit
 import Foundation
 import AgentIslandCore
+import PersonaKit
 
 // agent-island v0 app: a menu-bar (accessory) item plus an always-on-top floating
 // "island" panel. Both list your active Claude Code sessions and their derived state,
-// polled from ~/.claude transcripts via the verified AgentIslandCore. Runs as a plain
-// SwiftPM executable:
+// polled from ~/.claude transcripts via the verified AgentIslandCore, and each session
+// wears a persona (PersonaKit) locked to it for the session. Plain SwiftPM executable:
 //
 //   swift run AgentIslandApp          # or pick the AgentIslandApp scheme in Xcode and Run
 //
-// The island appears (top-right) only while sessions are active; toggle it or quit from
-// the menu-bar item. Polling is a v0 shortcut — the daemon + hooks (built, not yet
-// wired) will replace it with event-driven updates.
+// Color stays core-owned (legibility); personas vary only glyph + wording. The island
+// appears (top-right) only while sessions are active; toggle it or quit from the menu.
+// Polling is a v0 shortcut — the daemon + hooks will replace it with event-driven updates.
 
 final class AppController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -23,8 +24,9 @@ final class AppController: NSObject {
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
     private let activeWindow: TimeInterval = 600  // a session touched within 10 min is "active"
+    private let pool = BuiltInPersonas.all
 
-    private struct Session { let id: String; let status: AgentStatus }
+    private struct Session { let fullID: String; let shortID: String; let status: AgentStatus }
 
     func start() {
         statusItem.button?.title = "○"
@@ -47,9 +49,7 @@ final class AppController: NSObject {
             menu.addItem(infoItem("No active Claude Code sessions"))
         } else {
             menu.addItem(infoItem("Active sessions"))
-            for s in sessions {
-                menu.addItem(infoItem("\(glyph(s.status))  \(s.id)  —  \(describe(s.status))"))
-            }
+            for s in sessions { menu.addItem(infoItem(rowText(for: s))) }
         }
         menu.addItem(.separator())
         let toggle = NSMenuItem(title: "Show floating island", action: #selector(toggleIsland), keyEquivalent: "")
@@ -63,16 +63,17 @@ final class AppController: NSObject {
         quit.isEnabled = true
         menu.addItem(quit)
 
-        // Menu-bar glyph reflects the most-urgent state.
+        // Menu-bar glyph reflects the most-urgent state (core glyphs, not persona-specific).
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
         statusItem.button?.title = waiting > 0 ? "● \(waiting)" : (working ? "◐" : "○")
 
-        // Floating island — shown only when enabled and there is something to show.
+        // Floating island
         if islandEnabled && !sessions.isEmpty {
             let rows = sessions.map {
-                IslandPanel.Row(glyph: glyph($0.status), color: color($0.status),
-                                text: "\($0.id)  —  \(describe($0.status))")
+                IslandPanel.Row(glyph: persona(for: $0).skin(for: $0.status).glyph,
+                                color: color($0.status),
+                                text: rowText(for: $0, includeGlyph: false))
             }
             island.update(rows: rows)
             layoutIsland(rowCount: rows.count)
@@ -82,9 +83,19 @@ final class AppController: NSObject {
         }
     }
 
+    private func rowText(for s: Session, includeGlyph: Bool = true) -> String {
+        let skin = persona(for: s).skin(for: s.status)
+        let prefix = includeGlyph ? "\(skin.glyph)  " : ""
+        return "\(prefix)\(s.shortID)  —  \(skin.label)"
+    }
+
+    private func persona(for s: Session) -> Persona {
+        PersonaRuntime.persona(forSessionID: s.fullID, pool: pool) ?? BuiltInPersonas.minimal
+    }
+
     private func layoutIsland(rowCount: Int) {
-        let width: CGFloat = 320
-        let height = CGFloat(24 + 12 + (rowCount + 1) * 20 + 12)  // header row + N rows + insets
+        let width: CGFloat = 340
+        let height = CGFloat(12 + (rowCount + 1) * 20 + 12)  // header row + N session rows + insets
         var frame = NSRect(x: 0, y: 0, width: width, height: height)
         if let visible = NSScreen.main?.visibleFrame {
             frame.origin = NSPoint(x: visible.maxX - width - 16, y: visible.maxY - height - 16)
@@ -119,8 +130,8 @@ final class AppController: NSObject {
                 let records = TranscriptAdapter.parse(lines: readLines(p))
                 let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
                 let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subAgentStatuses(forSession: p))
-                let id = String(((p as NSString).lastPathComponent as NSString).deletingPathExtension.prefix(8))
-                found.append((Session(id: id, status: rolled), mtime))
+                let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
+                found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)), status: rolled), mtime))
             }
         }
         return found.sorted { $0.mtime > $1.mtime }.map(\.session)
@@ -148,31 +159,12 @@ final class AppController: NSObject {
         if case .waitingForInput = s { return true } else { return false }
     }
 
-    private func glyph(_ s: AgentStatus) -> String {
-        switch s {
-        case .working: return "◐"
-        case .waitingForInput: return "●"
-        case .finished(.failed): return "✗"
-        case .finished: return "✓"
-        }
-    }
-
     private func color(_ s: AgentStatus) -> NSColor {
         switch s {
         case .working: return .systemYellow
         case .waitingForInput: return .systemRed
         case .finished(.failed): return .systemRed
         case .finished: return .systemGreen
-        }
-    }
-
-    private func describe(_ s: AgentStatus) -> String {
-        switch s {
-        case .working: return "working"
-        case .waitingForInput(.permission): return "waiting (permission)"
-        case .waitingForInput: return "waiting for you"
-        case .finished(.failed): return "done (failed)"
-        case .finished: return "done"
         }
     }
 }
