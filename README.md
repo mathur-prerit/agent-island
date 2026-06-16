@@ -8,16 +8,37 @@ A quirky, quiet, always-on-top macOS status **island** that watches your Claude 
 
 No Claude Code hook cleanly separates "waiting for input" from "finished" (`Stop` fires for both). agent-island derives state from the session transcript: it reads the **last conversational record** (skipping metadata records like `ai-title` / `permission-mode`), where a trailing assistant `tool_use` block means *working* and a stopped turn means *waiting for you*; an open permission prompt is an explicit block; `SessionEnd` / quit / staleness means *finished*. Sub-agents are read from `<session-uuid>/subagents/**/agent-*.jsonl`. All of this was verified against real `~/.claude` transcripts — see [`spike/FINDINGS.md`](spike/FINDINGS.md).
 
-## Build & test
+## Install & run (no Apple ID, no signing)
 
-Requires Swift 6+. The core logic is framework-free and runs under **Command Line Tools** (no full Xcode needed):
+Gatekeeper's "unidentified developer" warning only affects *downloaded* unsigned apps — building locally avoids it entirely. Pick one (all need only Swift 6+, via Xcode or Command Line Tools — AppKit compiles under either):
+
+**Run from source**
+```sh
+git clone https://github.com/mathur-prerit/agent-island
+cd agent-island
+swift run AgentIslandApp      # a menu-bar item appears at the top-right
+```
+
+**Build a double-clickable app**
+```sh
+./Scripts/build-app.sh
+open build/AgentIsland.app    # opens with no warning — you built it locally
+```
+
+**Homebrew (build-from-source)**
+```sh
+brew tap mathur-prerit/agent-island https://github.com/mathur-prerit/agent-island
+brew install --HEAD agent-island
+agent-island
+```
+
+## Build & test
 
 ```sh
 swift build
-swift run AgentIslandSelfTest
+swift run AgentIslandSelfTest   # framework-free self-test runner (65 checks)
+swift run AgentIslandDemo       # the engine on your real ~/.claude transcripts
 ```
-
-The AppKit island UI (under `App/`, in progress) requires full Xcode to build.
 
 ## Layout
 
