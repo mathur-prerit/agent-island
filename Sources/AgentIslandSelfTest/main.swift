@@ -147,6 +147,37 @@ check(allSkinned, "every persona has a glyph + label for all states")
 let personasChosen = Set((0..<50).map { PersonaRuntime.persona(forSessionID: "s\($0)", pool: BuiltInPersonas.all)?.name ?? "" })
 check(personasChosen.count >= 2, "different sessions get different personas")
 
+// --- Hook installer file I/O (SettingsFile) ---
+let tmpDir = NSTemporaryDirectory() + "ai-settings-\(getpid())"
+try? FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+let settingsTestPath = tmpDir + "/settings.json"
+try? Data(#"{"otherKey":7}"#.utf8).write(to: URL(fileURLWithPath: settingsTestPath))
+let installedOK = (try? SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop"])) != nil
+check(installedOK, "SettingsFile.install succeeds on a real file")
+func parsedHookCount(_ path: String, event: String, command: String) -> Int {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let hooks = root["hooks"] as? [String: Any],
+          let entries = hooks[event] as? [[String: Any]] else { return -1 }
+    return entries.filter { ($0["hooks"] as? [[String: Any]])?.contains { ($0["command"] as? String) == command } ?? false }.count
+}
+func parsedOtherKey(_ path: String) -> Int? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    return root["otherKey"] as? Int
+}
+check(parsedOtherKey(settingsTestPath) == 7 && parsedHookCount(settingsTestPath, event: "Stop", command: "/x/hook relay") == 1,
+      "install preserves other keys + adds our hook")
+check(FileManager.default.fileExists(atPath: settingsTestPath + ".bak"), "install writes a .bak backup")
+_ = try? SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop"])
+check(parsedHookCount(settingsTestPath, event: "Stop", command: "/x/hook relay") == 1, "re-install is idempotent (command appears once)")
+try? Data("not json".utf8).write(to: URL(fileURLWithPath: settingsTestPath))
+var installAborted = false
+do { try SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop"]) } catch { installAborted = true }
+check(installAborted, "corrupt settings.json -> install throws (no clobber)")
+check(((try? String(contentsOfFile: settingsTestPath, encoding: .utf8)) ?? "") == "not json", "corrupt file left untouched")
+try? FileManager.default.removeItem(atPath: tmpDir)
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")

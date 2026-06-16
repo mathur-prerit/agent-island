@@ -16,6 +16,8 @@ let package = Package(
         .executable(name: "AgentIslandDemo", targets: ["AgentIslandDemo"]),
         // The visible widget: menu-bar item + floating island. Plain SwiftPM executable.
         .executable(name: "AgentIslandApp", targets: ["AgentIslandApp"]),
+        // The hook bridge Claude Code invokes: install/uninstall hooks + relay events.
+        .executable(name: "AgentIslandHookCLI", targets: ["AgentIslandHookCLI"]),
     ],
     targets: [
         .target(name: "AgentIslandCore"),
@@ -27,5 +29,6 @@ let package = Package(
             dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
         .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit"]),
+        .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
     ]
 )
