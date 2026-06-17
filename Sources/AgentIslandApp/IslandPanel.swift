@@ -92,17 +92,23 @@ final class IslandPanel: NSPanel {
             ordered.append(view)
         }
         // Collect stale ids first, then delete — don't mutate `rowViews` while iterating it.
+        // removeFromSuperview() also detaches the row from the stack's arranged list, so this
+        // is the only pruning needed (the only arranged views are `header` + current rows).
         for id in rowViews.keys.filter({ !seen.contains($0) }) {
             rowViews[id]?.removeFromSuperview()
             rowViews.removeValue(forKey: id)
         }
-        // Reorder the stack to match `ordered`, reusing existing arranged subviews.
-        for v in stack.arrangedSubviews where !ordered.contains(v) { stack.removeArrangedSubview(v); v.removeFromSuperview() }
+        // Place each desired view at its target index, reusing the existing instances so their
+        // Core Animation loops keep running. CRITICAL: only call removeArrangedSubview on a view
+        // that is CURRENTLY arranged. Calling it on a non-arranged view (a brand-new row, or the
+        // header on first layout) raises NSInternalInconsistencyException ("View … is not (and
+        // has to be) in stack view") and aborts the app on macOS 26+. A not-yet-arranged view is
+        // added directly by insertArrangedSubview.
         for (i, v) in ordered.enumerated() {
-            if stack.arrangedSubviews.firstIndex(of: v) != i {
-                stack.removeArrangedSubview(v)
-                stack.insertArrangedSubview(v, at: i)
-            }
+            let current = stack.arrangedSubviews.firstIndex(of: v)
+            if current == i { continue }
+            if current != nil { stack.removeArrangedSubview(v) }
+            stack.insertArrangedSubview(v, at: min(i, stack.arrangedSubviews.count))
         }
         resizeAndReposition()
     }
