@@ -240,23 +240,26 @@ final class SessionRowView: NSView {
 
         if became {
             // Tear down the previous state's looping cues before installing the new ones.
+            // Pass `cue` to stopPulse so a leftover urgent alert ring is cleared too.
             IslandAnimations.removeWorkingRing(from: cue)
             IslandAnimations.removeIdleDot(from: cue)
-            IslandAnimations.stopPulse(on: glyph)
+            IslandAnimations.stopPulse(on: glyph, cue: cue)
+            IslandAnimations.stopWorkingGlyph(on: glyph)
 
             switch key {
             case "working":
                 glyph.isHidden = false
-                IslandAnimations.installWorkingRing(on: cue)
+                IslandAnimations.installWorkingRing(on: cue)   // hue-flowing spin + orbiting twinkle dot
+                IslandAnimations.startWorkingGlyph(on: glyph)  // anchor-independent bob + opacity swell
             case "idle":
                 glyph.isHidden = true
                 IslandAnimations.installIdleDot(on: cue)
             case "wait-permission":
                 glyph.isHidden = false
-                IslandAnimations.startPulse(on: glyph, urgent: true)
+                IslandAnimations.startPulse(on: glyph, urgent: true, cue: cue)  // glyph pulse + amber alert ring on cue
             case "wait-stopped":
                 glyph.isHidden = false
-                IslandAnimations.startPulse(on: glyph, urgent: false)
+                IslandAnimations.startPulse(on: glyph, urgent: false, cue: cue)
             default:  // "finished", "neutral"
                 glyph.isHidden = false
             }
@@ -264,7 +267,7 @@ final class SessionRowView: NSView {
         }
 
         if transitionedToFinished {
-            IslandAnimations.celebrate(glyph, success: row.verdict != .failed)
+            IslandAnimations.celebrate(glyph, success: row.verdict != .failed, cue: cue)
         }
     }
 }
