@@ -44,6 +44,7 @@ final class AppController: NSObject {
         let t = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        maybeOfferEventDrivenSetup()
     }
 
     private func refresh() {
@@ -60,6 +61,12 @@ final class AppController: NSObject {
         let toggle = NSMenuItem(title: "Show floating island", action: #selector(toggleIsland), keyEquivalent: "")
         toggle.target = self; toggle.isEnabled = true; toggle.state = islandEnabled ? .on : .off
         menu.addItem(toggle)
+        let eventOn = UserDefaults.standard.string(forKey: eventModeKey) == "enabled"
+        let eventToggle = NSMenuItem(title: "Event-driven mode", action: #selector(toggleEventMode), keyEquivalent: "")
+        eventToggle.target = self
+        eventToggle.isEnabled = EventDrivenSetup.available || eventOn
+        eventToggle.state = eventOn ? .on : .off
+        menu.addItem(eventToggle)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agent-island", action: #selector(quit), keyEquivalent: "q")
         quit.target = self; quit.isEnabled = true
@@ -138,6 +145,54 @@ final class AppController: NSObject {
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
+
+    // MARK: - Event-driven mode (daemon + hooks) — reversible, first-launch consent
+
+    private let eventModeKey = "eventDrivenSetupDecision"  // "enabled" | "declined" | "error"
+
+    private func maybeOfferEventDrivenSetup() {
+        let defaults = UserDefaults.standard
+        if let decision = defaults.string(forKey: eventModeKey) {
+            if decision == "enabled" { EventDrivenSetup.ensureDaemonRunning() }
+            return
+        }
+        guard EventDrivenSetup.available else { return }  // e.g. `swift run` without `swift build`
+        let alert = NSAlert()
+        alert.messageText = "Enable event-driven mode?"
+        alert.informativeText = "agent-island can update instantly by adding small hooks to "
+            + "~/.claude/settings.json (reversible) and running a tiny background daemon. "
+            + "Otherwise it polls your transcripts every few seconds."
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Not now")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            do {
+                try EventDrivenSetup.installHooks()
+                EventDrivenSetup.ensureDaemonRunning()
+                defaults.set("enabled", forKey: eventModeKey)
+            } catch {
+                defaults.set("error", forKey: eventModeKey)
+            }
+        } else {
+            defaults.set("declined", forKey: eventModeKey)
+        }
+    }
+
+    @objc private func toggleEventMode() {
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: eventModeKey) == "enabled" {
+            try? EventDrivenSetup.uninstallHooks()
+            defaults.set("declined", forKey: eventModeKey)
+        } else {
+            guard EventDrivenSetup.available else { return }
+            do {
+                try EventDrivenSetup.installHooks()
+                EventDrivenSetup.ensureDaemonRunning()
+                defaults.set("enabled", forKey: eventModeKey)
+            } catch { defaults.set("error", forKey: eventModeKey) }
+        }
+        refresh()
+    }
 
     // MARK: - Sessions (daemon state if running, else poll transcripts)
 
