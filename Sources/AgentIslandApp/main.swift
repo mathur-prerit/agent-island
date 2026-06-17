@@ -240,7 +240,13 @@ final class AppController: NSObject {
                 let records = TranscriptAdapter.parse(lines: lines)
                 let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
                 let subs = subAgentStatuses(forSession: p)
-                let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
+                var rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
+                // A session stopped (waiting) but quiet >10 min reads as idle, not "waiting on
+                // you" — mirrors the daemon's idle downgrade. (Polling still can't tell a truly
+                // closed session from a long wait, but at least it stops nagging.)
+                if case .waitingForInput = rolled, Date().timeIntervalSince(mtime) > 600 {
+                    rolled = .finished(.success)
+                }
                 let steps = records.reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
                 let tokens = TokenUsage.freshTokens(lines: lines)
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension

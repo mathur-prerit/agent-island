@@ -222,6 +222,11 @@ _ = labelStore.apply(eventType: "SessionStart", sessionID: "p1",
 check(labelStore.snapshot(now: t0).sessions.first?.label == "fpt-be-external-data-service", "daemon derives project-name label from cwd")
 check(labelStore.snapshot(now: t0.addingTimeInterval(60)).sessions.count == 1, "daemon keeps a session within the 30m window")
 check(labelStore.snapshot(now: t0.addingTimeInterval(1801)).sessions.isEmpty, "daemon prunes a session idle >30m")
+let idleStore = StateStore()
+let tw = Date(timeIntervalSince1970: 1_700_000_000)
+_ = idleStore.apply(eventType: "Stop", sessionID: "w1", at: tw)   // Stop -> waiting
+check(idleStore.snapshot(now: tw.addingTimeInterval(60)).sessions.first?.state == "waiting", "recently-stopped session still reads waiting")
+check(idleStore.snapshot(now: tw.addingTimeInterval(601)).sessions.first?.state == "done", "stopped & quiet >10m downgrades waiting -> done (idle)")
 
 // --- Token usage ---
 let usageLines = [

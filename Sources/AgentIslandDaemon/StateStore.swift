@@ -9,6 +9,9 @@ public final class StateStore {
     /// Sessions idle (no events) longer than this are pruned from the snapshot, matching the
     /// app's polling active-window — so closed/done sessions age off instead of accumulating.
     public static let pruneAfter: TimeInterval = 1800  // 30 min
+    /// A session that stopped its turn (waiting) but has been quiet this long reads as idle, not
+    /// "waiting on you" — report it as done so only *recently* stopped sessions say "waiting".
+    public static let idleWaitingAfter: TimeInterval = 600  // 10 min
 
     public init() {}
 
@@ -53,6 +56,13 @@ public final class StateStore {
             sessions.removeValue(forKey: id)
             lastSeen.removeValue(forKey: id)
         }
-        return DaemonState(sessions: sessions.values.sorted { $0.sessionID < $1.sessionID })
+        let idleCutoff = now.addingTimeInterval(-StateStore.idleWaitingAfter)
+        let out = sessions.values.map { snap -> SessionSnapshot in
+            // A waiting session that's been quiet past the idle threshold reads as done/idle.
+            guard snap.state == "waiting" || snap.state == "waiting-permission",
+                  let seen = lastSeen[snap.sessionID], seen < idleCutoff else { return snap }
+            var s = snap; s.state = "done"; return s
+        }
+        return DaemonState(sessions: out.sorted { $0.sessionID < $1.sessionID })
     }
 }
