@@ -214,6 +214,15 @@ let daemonDecoded = try? JSONDecoder().decode(DaemonState.self, from: daemonEnco
 check(daemonDecoded == daemonState, "DaemonState JSON round-trips")
 check(AgentStatus.working.stateToken == "working" && AgentStatus(stateToken: "waiting") == .waitingForInput(.stoppedTurn), "AgentStatus <-> token mapping")
 
+// daemon: project-name label from cwd + idle pruning (injectable clock)
+let labelStore = StateStore()
+let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+_ = labelStore.apply(eventType: "SessionStart", sessionID: "p1",
+                     cwd: "/Users/me/projects/fibr/fpt/fpt-be-external-data-service", at: t0)
+check(labelStore.snapshot(now: t0).sessions.first?.label == "fpt-be-external-data-service", "daemon derives project-name label from cwd")
+check(labelStore.snapshot(now: t0.addingTimeInterval(60)).sessions.count == 1, "daemon keeps a session within the 30m window")
+check(labelStore.snapshot(now: t0.addingTimeInterval(1801)).sessions.isEmpty, "daemon prunes a session idle >30m")
+
 // --- Token usage ---
 let usageLines = [
     #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9999}}}"#,

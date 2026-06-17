@@ -42,12 +42,23 @@ do {
 publishState()
 print("agentislandd listening at \(socketPath); state -> \(statePath)")
 
+// Heartbeat: republish on a timer so state.json stays fresh (the app treats a file older than
+// 30s as "daemon down" and falls back to polling) and idle sessions get pruned even when no new
+// events arrive. acceptLoop blocks the main thread, so run this on a background queue.
+DispatchQueue.global(qos: .utility).async {
+    while true {
+        Thread.sleep(forTimeInterval: 10)
+        publishState()
+    }
+}
+
 server.acceptLoop { payload in
     guard let obj = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else { return }
     // Claude Code hook payloads carry the event under `hook_event_name`; tolerate `type`.
     let eventType = (obj["hook_event_name"] as? String) ?? (obj["type"] as? String) ?? ""
     let sessionID = (obj["session_id"] as? String) ?? ""
-    if store.apply(eventType: eventType, sessionID: sessionID) {
+    let cwd = obj["cwd"] as? String   // project dir → label
+    if store.apply(eventType: eventType, sessionID: sessionID, cwd: cwd) {
         publishState()
     }
 }

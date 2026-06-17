@@ -204,17 +204,20 @@ final class AppController: NSObject {
 
     private func daemonSessions() -> [Session]? {
         let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
+        // A FRESH state.json (daemon heartbeats every 10s) is authoritative — trust it even when
+        // it lists no sessions (the daemon genuinely knows nothing is active), so we don't fall
+        // back to polling and resurface closed sessions as "open". nil only means "daemon down"
+        // (file stale/absent/unreadable), which legitimately falls through to polling.
         guard let attrs = try? fm.attributesOfItem(atPath: statePath),
               let mtime = attrs[.modificationDate] as? Date,
               Date().timeIntervalSince(mtime) < 30,
               let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
-              let state = try? JSONDecoder().decode(DaemonState.self, from: data),
-              !state.sessions.isEmpty else { return nil }
+              let state = try? JSONDecoder().decode(DaemonState.self, from: data) else { return nil }
         return state.sessions.map { snap in
             var subs: [AgentStatus] = Array(repeating: .working, count: snap.subActive)
             subs += Array(repeating: .finished(.success), count: snap.subDone)
             let short = String(snap.sessionID.prefix(8))
-            return Session(fullID: snap.sessionID, shortID: short, label: short,
+            return Session(fullID: snap.sessionID, shortID: short, label: snap.label ?? short,
                            status: AgentStatus(stateToken: snap.state), subStatuses: subs, steps: 0,
                            tokens: 0)
         }

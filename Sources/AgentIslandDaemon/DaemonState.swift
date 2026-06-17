@@ -7,11 +7,13 @@ public struct SessionSnapshot: Codable, Equatable {
     public var state: String     // working | waiting | waiting-permission | done | failed
     public var subActive: Int
     public var subDone: Int
-    public init(sessionID: String, state: String, subActive: Int = 0, subDone: Int = 0) {
+    public var label: String?    // project name (lastPathComponent of the session's cwd), if known
+    public init(sessionID: String, state: String, subActive: Int = 0, subDone: Int = 0, label: String? = nil) {
         self.sessionID = sessionID
         self.state = state
         self.subActive = subActive
         self.subDone = subDone
+        self.label = label
     }
 }
 
