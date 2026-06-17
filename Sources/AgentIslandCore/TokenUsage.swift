@@ -19,4 +19,14 @@ public enum TokenUsage {
         }
         return total
     }
+
+    /// Compact label: `<1000 -> "N"`, `<10k -> "N.Nk"`, `<1M -> "Nk"`, else `"N.NM"`.
+    public static func compact(_ n: Int) -> String {
+        if n < 1_000 { return "\(n)" }
+        if n < 1_000_000 {
+            let k = Double(n) / 1_000
+            return k < 10 ? String(format: "%.1fk", k) : "\(Int(k.rounded()))k"
+        }
+        return String(format: "%.1fM", Double(n) / 1_000_000)
+    }
 }

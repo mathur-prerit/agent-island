@@ -210,6 +210,10 @@ let usageLines = [
 ]
 check(TokenUsage.freshTokens(lines: usageLines) == 165, "freshTokens sums input+output across both usage shapes, ignoring cache")
 check(TokenUsage.freshTokens(lines: []) == 0, "freshTokens empty -> 0")
+check(TokenUsage.compact(999) == "999", "compact < 1000 is raw")
+check(TokenUsage.compact(1500) == "1.5k", "compact thousands one-decimal")
+check(TokenUsage.compact(146_000) == "146k", "compact tens-of-thousands integer k")
+check(TokenUsage.compact(2_870_000) == "2.9M", "compact millions one-decimal")
 
 print("")
 if failures == 0 {
