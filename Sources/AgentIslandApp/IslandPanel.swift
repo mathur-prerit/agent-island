@@ -20,11 +20,11 @@ final class IslandPanel: NSPanel {
 
     struct Row {
         let glyph: String; let color: NSColor; let title: String; let state: String
-        let pulsing: Bool; let dimmed: Bool; let subRows: [SubRow]
+        let pulsing: Bool; let spinning: Bool; let dimmed: Bool; let subRows: [SubRow]
         init(glyph: String, color: NSColor, title: String, state: String,
-             pulsing: Bool = false, dimmed: Bool = false, subRows: [SubRow] = []) {
+             pulsing: Bool = false, spinning: Bool = false, dimmed: Bool = false, subRows: [SubRow] = []) {
             self.glyph = glyph; self.color = color; self.title = title; self.state = state
-            self.pulsing = pulsing; self.dimmed = dimmed; self.subRows = subRows
+            self.pulsing = pulsing; self.spinning = spinning; self.dimmed = dimmed; self.subRows = subRows
         }
     }
 
@@ -106,6 +106,20 @@ final class IslandPanel: NSPanel {
             disclosure.font = .systemFont(ofSize: 9)
             disclosure.contentTintColor = .tertiaryLabelColor
             line.addArrangedSubview(disclosure)
+        }
+
+        if row.spinning {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isIndeterminate = true
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                spinner.widthAnchor.constraint(equalToConstant: 13),
+                spinner.heightAnchor.constraint(equalToConstant: 13),
+            ])
+            spinner.startAnimation(nil)
+            line.addArrangedSubview(spinner)
         }
 
         let glyph = NSTextField(labelWithString: row.glyph)

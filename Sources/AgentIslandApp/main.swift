@@ -24,7 +24,7 @@ final class AppController: NSObject {
 
     private struct Session {
         let fullID: String; let shortID: String; let label: String
-        let status: AgentStatus; let subStatuses: [AgentStatus]
+        let status: AgentStatus; let subStatuses: [AgentStatus]; let steps: Int
     }
 
     func start() {
@@ -68,13 +68,15 @@ final class AppController: NSObject {
             } else {
                 rows = sessions.map { s -> IslandPanel.Row in
                     let skin = persona(for: s).skin(for: s.status)
+                    let working = (s.status == .working)
+                    let stateText = (working && s.steps > 0) ? "\(skin.label) · \(s.steps) steps" : skin.label
                     let subRows = s.subStatuses.map {
                         IslandPanel.SubRow(glyph: "↳", color: color($0), text: subDescribe($0))
                     }
                     return IslandPanel.Row(glyph: skin.glyph, color: color(s.status),
-                                           title: s.label, state: skin.label,
-                                           pulsing: isWaiting(s.status), dimmed: isFinished(s.status),
-                                           subRows: subRows)
+                                           title: s.label, state: stateText,
+                                           pulsing: isWaiting(s.status), spinning: working,
+                                           dimmed: isFinished(s.status), subRows: subRows)
                 }
             }
             island.update(rows: rows)
@@ -119,7 +121,7 @@ final class AppController: NSObject {
             subs += Array(repeating: .finished(.success), count: snap.subDone)
             let short = String(snap.sessionID.prefix(8))
             return Session(fullID: snap.sessionID, shortID: short, label: short,
-                           status: AgentStatus(stateToken: snap.state), subStatuses: subs)
+                           status: AgentStatus(stateToken: snap.state), subStatuses: subs, steps: 0)
         }
     }
 
@@ -141,10 +143,11 @@ final class AppController: NSObject {
                 let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
                 let subs = subAgentStatuses(forSession: p)
                 let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
+                let steps = records.reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
                 let label = projectName(fromLines: lines) ?? String(fullID.prefix(8))
                 found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
-                                      label: label, status: rolled, subStatuses: subs), mtime))
+                                      label: label, status: rolled, subStatuses: subs, steps: steps), mtime))
             }
         }
         return found.sorted { $0.mtime > $1.mtime }.map(\.session)
