@@ -67,6 +67,18 @@ final class AppController: NSObject {
         eventToggle.isEnabled = EventDrivenSetup.available || eventOn
         eventToggle.state = eventOn ? .on : .off
         menu.addItem(eventToggle)
+
+        let themeItem = NSMenuItem(title: "Animation theme", action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu()
+        let currentTheme = UserDefaults.standard.string(forKey: "islandTheme") ?? Themes.all[0].id
+        for t in Themes.all {
+            let ti = NSMenuItem(title: t.displayName, action: #selector(pickTheme(_:)), keyEquivalent: "")
+            ti.target = self; ti.representedObject = t.id; ti.state = (t.id == currentTheme) ? .on : .off
+            themeMenu.addItem(ti)
+        }
+        themeItem.submenu = themeMenu
+        menu.addItem(themeItem)
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agent-island", action: #selector(quit), keyEquivalent: "q")
         quit.target = self; quit.isEnabled = true
@@ -118,7 +130,8 @@ final class AppController: NSObject {
                                            title: s.label, state: stateText,
                                            spinning: isWorking,
                                            dimmed: !isWorking,  // only the running row stays bright
-                                           waitReason: reason, verdict: verdict(s.status), subRows: subRows)
+                                           waitReason: reason, verdict: verdict(s.status),
+                                           tokens: s.tokens, subRows: subRows)
                 }
             }
             island.update(rows: rows)
@@ -145,6 +158,13 @@ final class AppController: NSObject {
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
+
+    @objc private func pickTheme(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(id, forKey: "islandTheme")
+        island.setTheme(id)
+        refresh()
+    }
 
     // MARK: - Event-driven mode (daemon + hooks) — reversible, first-launch consent
 
@@ -217,10 +237,19 @@ final class AppController: NSObject {
             var subs: [AgentStatus] = Array(repeating: .working, count: snap.subActive)
             subs += Array(repeating: .finished(.success), count: snap.subDone)
             let short = String(snap.sessionID.prefix(8))
+            let tokens = snap.cwd.map { daemonTokens(cwd: $0, sessionID: snap.sessionID) } ?? 0
             return Session(fullID: snap.sessionID, shortID: short, label: snap.label ?? short,
                            status: AgentStatus(stateToken: snap.state), subStatuses: subs, steps: 0,
-                           tokens: 0)
+                           tokens: tokens)
         }
+    }
+
+    /// Fresh-token count for a daemon session, read from its transcript. The transcript lives at
+    /// ~/.claude/projects/<cwd with "/"→"-">/<sessionID>.jsonl. (The daemon tracks state, not
+    /// tokens, so the app computes them the same way the polling path does.)
+    private func daemonTokens(cwd: String, sessionID: String) -> Int {
+        let encoded = cwd.replacingOccurrences(of: "/", with: "-")
+        return TokenUsage.freshTokens(lines: readLines("\(projectsDir)/\(encoded)/\(sessionID).jsonl"))
     }
 
     private func polledSessions() -> [Session] {

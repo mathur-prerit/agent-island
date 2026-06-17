@@ -8,12 +8,15 @@ public struct SessionSnapshot: Codable, Equatable {
     public var subActive: Int
     public var subDone: Int
     public var label: String?    // project name (lastPathComponent of the session's cwd), if known
-    public init(sessionID: String, state: String, subActive: Int = 0, subDone: Int = 0, label: String? = nil) {
+    public var cwd: String?      // full working dir — lets the app find the transcript to sum tokens
+    public init(sessionID: String, state: String, subActive: Int = 0, subDone: Int = 0,
+                label: String? = nil, cwd: String? = nil) {
         self.sessionID = sessionID
         self.state = state
         self.subActive = subActive
         self.subDone = subDone
         self.label = label
+        self.cwd = cwd
     }
 }
 

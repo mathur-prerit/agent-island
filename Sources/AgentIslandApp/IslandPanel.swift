@@ -32,8 +32,9 @@ final class IslandPanel: NSPanel {
     private let maxRowsHeight: CGFloat = 260         // cap; rows beyond this scroll
     private static let expandedKey = "islandExpanded"
 
-    private var ticker: Timer?                       // shared CLI-cue animator
+    private var ticker: Timer?                       // shared cue animator
     private var frameCount = 0
+    private var theme: IslandTheme = Themes.named(UserDefaults.standard.string(forKey: "islandTheme"))
 
     struct SubRow {
         let glyph: String; let color: NSColor; let text: String
@@ -46,13 +47,13 @@ final class IslandPanel: NSPanel {
         let id: String
         let glyph: String; let color: NSColor; let title: String; let state: String
         let spinning: Bool; let dimmed: Bool
-        let waitReason: WaitReason?; let verdict: Verdict?; let subRows: [SubRow]
+        let waitReason: WaitReason?; let verdict: Verdict?; let tokens: Int; let subRows: [SubRow]
         init(id: String, glyph: String, color: NSColor, title: String, state: String,
              spinning: Bool = false, dimmed: Bool = false,
-             waitReason: WaitReason? = nil, verdict: Verdict? = nil, subRows: [SubRow] = []) {
+             waitReason: WaitReason? = nil, verdict: Verdict? = nil, tokens: Int = 0, subRows: [SubRow] = []) {
             self.id = id; self.glyph = glyph; self.color = color; self.title = title; self.state = state
             self.spinning = spinning; self.dimmed = dimmed
-            self.waitReason = waitReason; self.verdict = verdict; self.subRows = subRows
+            self.waitReason = waitReason; self.verdict = verdict; self.tokens = tokens; self.subRows = subRows
         }
     }
 
@@ -141,6 +142,13 @@ final class IslandPanel: NSPanel {
         render()
     }
 
+    /// Switch the animation theme (from the menu); re-render all rows with it.
+    func setTheme(_ id: String) {
+        theme = Themes.named(id)
+        rowViews.values.forEach { $0.theme = theme }
+        render()
+    }
+
     private func render() {
         var ordered: [NSView] = []
         var seen = Set<String>()
@@ -148,6 +156,7 @@ final class IslandPanel: NSPanel {
             seen.insert(row.id)
             let view = rowViews[row.id] ?? {
                 let v = SessionRowView()
+                v.theme = theme
                 v.onToggle = { [weak self] in self?.resizeAndReposition() }
                 rowViews[row.id] = v
                 return v
@@ -252,10 +261,11 @@ final class SessionRowView: NSView {
     private let subStack = NSStackView()
     private let disclosure = FirstMouseButton(title: "▸", target: nil, action: nil)
     private var expanded = false
-    private var animKind = "static"     // "working" | "waiting" | "static"
+    private var currentRow: IslandPanel.Row?
+    var theme: IslandTheme = JourneyTheme()
 
     var onToggle: (() -> Void)?
-    var isAnimating: Bool { animKind == "working" || animKind == "waiting" }
+    var isAnimating: Bool { currentRow.map { theme.animates($0) } ?? false }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -269,9 +279,8 @@ final class SessionRowView: NSView {
         line.translatesAutoresizingMaskIntoConstraints = false
 
         indicator.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
-        indicator.alignment = .center
         indicator.translatesAutoresizingMaskIntoConstraints = false
-        indicator.widthAnchor.constraint(equalToConstant: 15).isActive = true
+        indicator.setContentHuggingPriority(.required, for: .horizontal)   // size to content (1 char .. wide road bar)
 
         glyph.font = .systemFont(ofSize: 16)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -330,13 +339,12 @@ final class SessionRowView: NSView {
         stateLabel.stringValue = row.state
         stateLabel.textColor = row.dimmed ? .tertiaryLabelColor : row.color
         glyph.stringValue = row.glyph
+        glyph.isHidden = !theme.showsPersonaGlyph || row.glyph.isEmpty
 
-        // CLI status cue + per-state background tint.
-        let cue = cue(for: row)
-        animKind = cue.kind
-        indicator.stringValue = cue.char
-        indicator.textColor = cue.color
-        layer?.backgroundColor = cue.tint.withAlphaComponent(0.13).cgColor
+        // Per-state background tint + the theme's status cue.
+        currentRow = row
+        layer?.backgroundColor = theme.tint(for: row).withAlphaComponent(0.13).cgColor
+        renderIndicator(frame: 0)
 
         // Disclosure + sub-rows (rebuild contents each update; preserve expanded state).
         let hasSubs = !row.subRows.isEmpty
@@ -355,26 +363,14 @@ final class SessionRowView: NSView {
         }
     }
 
-    /// The CLI cue for a row: its animation kind, the initial indicator char, that char's color,
-    /// and the row's background tint base color.
-    private func cue(for row: IslandPanel.Row) -> (kind: String, char: String, color: NSColor, tint: NSColor) {
-        if row.id == "idle" { return ("static", "·", .tertiaryLabelColor, .clear) }
-        if row.spinning { return ("working", IslandAnimations.braille[0], .systemTeal, .systemTeal) }
-        if row.waitReason != nil { return ("waiting", "▋", .systemOrange, .systemOrange) }
-        if row.verdict == .failed { return ("static", "✗", .systemRed, .systemRed) }
-        if row.dimmed { return ("static", "✓", .systemGreen, .systemGreen) }   // finished
-        return ("static", "·", .tertiaryLabelColor, .clear)
-    }
+    /// Advance the cue one tick (called by the panel's shared ticker).
+    func tick(_ frame: Int) { renderIndicator(frame: frame) }
 
-    /// Advance the CLI cue one tick (called by the panel's shared ticker).
-    func tick(_ frame: Int) {
-        switch animKind {
-        case "working":
-            indicator.stringValue = IslandAnimations.braille[frame % IslandAnimations.braille.count]
-        case "waiting":
-            indicator.stringValue = (frame / 5) % 2 == 0 ? "▋" : " "   // blink ~0.5s
-        default:
-            break
-        }
+    private func renderIndicator(frame: Int) {
+        guard let row = currentRow else { return }
+        let f = IslandAnimations.reduceMotion ? 0 : frame   // Reduce Motion → freeze on frame 0
+        let cue = theme.indicator(for: row, frame: f)
+        indicator.stringValue = cue.text
+        indicator.textColor = cue.color
     }
 }

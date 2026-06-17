@@ -25,6 +25,7 @@ public final class StateStore {
         var changed = false
 
         if let cwd = cwd, !cwd.isEmpty {
+            if snap.cwd != cwd { snap.cwd = cwd; changed = true }
             let name = (cwd as NSString).lastPathComponent
             if !name.isEmpty, snap.label != name { snap.label = name; changed = true }
         }

@@ -228,6 +228,12 @@ _ = idleStore.apply(eventType: "Stop", sessionID: "w1", at: tw)   // Stop -> wai
 check(idleStore.snapshot(now: tw.addingTimeInterval(60)).sessions.first?.state == "waiting", "recently-stopped session still reads waiting")
 check(idleStore.snapshot(now: tw.addingTimeInterval(601)).sessions.first?.state == "done", "stopped & quiet >10m downgrades waiting -> done (idle)")
 
+// journey theme: vehicle upgrades by token band
+check(JourneyMilestones.vehicle(forTokens: 10_000) == "🚲", "journey: <50k -> cycle")
+check(JourneyMilestones.vehicle(forTokens: 75_000) == "🚗", "journey: 50-100k -> car")
+check(JourneyMilestones.vehicle(forTokens: 150_000) == "🚆", "journey: 100-200k -> train")
+check(JourneyMilestones.vehicle(forTokens: 250_000) == "✈️", "journey: >=200k -> plane (danger)")
+
 // --- Token usage ---
 let usageLines = [
     #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9999}}}"#,
