@@ -10,7 +10,8 @@ import AgentIslandCore
 final class IslandPanel: NSPanel {
     private let container = NSVisualEffectView()
     private let stack = NSStackView()
-    private var disclosures: [ObjectIdentifier: NSStackView] = [:]
+    private var rowViews: [String: SessionRowView] = [:]
+    private let header = NSTextField(labelWithString: "agent-island")
 
     struct SubRow {
         let glyph: String; let color: NSColor; let text: String
@@ -73,13 +74,35 @@ final class IslandPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func update(rows: [Row]) {
-        disclosures.removeAll()
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let header = NSTextField(labelWithString: "agent-island")
-        header.font = .systemFont(ofSize: 11, weight: .semibold)
-        header.textColor = .tertiaryLabelColor
-        stack.addArrangedSubview(header)
-        for row in rows { stack.addArrangedSubview(sessionView(row)) }
+        if header.superview == nil {
+            header.font = .systemFont(ofSize: 11, weight: .semibold)
+            header.textColor = .tertiaryLabelColor
+        }
+        var ordered: [NSView] = [header]
+        var seen = Set<String>()
+        for row in rows {
+            seen.insert(row.id)
+            let view = rowViews[row.id] ?? {
+                let v = SessionRowView()
+                v.onToggle = { [weak self] in self?.resizeAndReposition() }
+                rowViews[row.id] = v
+                return v
+            }()
+            view.update(row)
+            ordered.append(view)
+        }
+        for (id, view) in rowViews where !seen.contains(id) {
+            view.removeFromSuperview()
+            rowViews.removeValue(forKey: id)
+        }
+        // Reorder the stack to match `ordered`, reusing existing arranged subviews.
+        for v in stack.arrangedSubviews where !ordered.contains(v) { stack.removeArrangedSubview(v); v.removeFromSuperview() }
+        for (i, v) in ordered.enumerated() {
+            if stack.arrangedSubviews.firstIndex(of: v) != i {
+                stack.removeArrangedSubview(v)
+                stack.insertArrangedSubview(v, at: i)
+            }
+        }
         resizeAndReposition()
     }
 
@@ -94,97 +117,114 @@ final class IslandPanel: NSPanel {
         setFrame(frame, display: true)
     }
 
-    private func sessionView(_ row: Row) -> NSView {
-        let outer = NSStackView()
-        outer.orientation = .vertical
-        outer.alignment = .leading
-        outer.spacing = 4
+}
 
-        let line = NSStackView()
+/// One reused-per-session row. Persists across refreshes so Core Animation loops aren't
+/// reseated each tick, and so a state transition (e.g. -> finished) can fire a one-shot once.
+final class SessionRowView: NSView {
+    private let line = NSStackView()
+    private let cue = NSView()            // fixed-size host for ring / idle dot (14x14)
+    private let glyph = NSTextField(labelWithString: "")
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let stateLabel = NSTextField(labelWithString: "")
+    private let cell = NSStackView()
+    private let subStack = NSStackView()
+    private var disclosure: NSButton?
+    private var expanded = false
+    private var statusKey: String?       // "working" | "wait-stopped" | "wait-permission" | "finished" | "idle"
+
+    var onToggle: (() -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+
         line.orientation = .horizontal
         line.alignment = .centerY
         line.spacing = 9
+        line.translatesAutoresizingMaskIntoConstraints = false
 
-        if !row.subRows.isEmpty {
-            let disclosure = NSButton(title: "▸", target: self, action: #selector(toggleDisclosure(_:)))
-            disclosure.isBordered = false
-            disclosure.font = .systemFont(ofSize: 9)
-            disclosure.contentTintColor = .tertiaryLabelColor
-            line.addArrangedSubview(disclosure)
-        }
+        cue.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            cue.widthAnchor.constraint(equalToConstant: 14),
+            cue.heightAnchor.constraint(equalToConstant: 14),
+        ])
 
-        if row.spinning {
-            let spinner = NSProgressIndicator()
-            spinner.style = .spinning
-            spinner.controlSize = .small
-            spinner.isIndeterminate = true
-            spinner.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                spinner.widthAnchor.constraint(equalToConstant: 13),
-                spinner.heightAnchor.constraint(equalToConstant: 13),
-            ])
-            spinner.startAnimation(nil)
-            line.addArrangedSubview(spinner)
-        }
-
-        let glyph = NSTextField(labelWithString: row.glyph)
         glyph.font = .systemFont(ofSize: 16)
-        line.addArrangedSubview(glyph)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
 
-        let cell = NSStackView()
         cell.orientation = .vertical
         cell.alignment = .leading
         cell.spacing = 1
-        let title = NSTextField(labelWithString: row.title)
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.textColor = row.dimmed ? .secondaryLabelColor : .labelColor
-        let state = NSTextField(labelWithString: row.state)
-        state.font = .systemFont(ofSize: 11, weight: .regular)
-        state.textColor = row.dimmed ? .tertiaryLabelColor : row.color
-        cell.addArrangedSubview(title)
-        cell.addArrangedSubview(state)
+        cell.addArrangedSubview(titleLabel)
+        cell.addArrangedSubview(stateLabel)
+
+        let disc = NSButton(title: "▸", target: self, action: #selector(toggle))
+        disc.isBordered = false
+        disc.font = .systemFont(ofSize: 9)
+        disc.contentTintColor = .tertiaryLabelColor
+        disclosure = disc
+
+        line.addArrangedSubview(disc)
+        line.addArrangedSubview(cue)
+        line.addArrangedSubview(glyph)
         line.addArrangedSubview(cell)
 
-        outer.addArrangedSubview(line)
+        subStack.orientation = .vertical
+        subStack.alignment = .leading
+        subStack.spacing = 2
+        subStack.edgeInsets = NSEdgeInsets(top: 2, left: 28, bottom: 2, right: 0)
+        subStack.isHidden = true
 
-        if !row.subRows.isEmpty {
-            let sub = NSStackView()
-            sub.orientation = .vertical
-            sub.alignment = .leading
-            sub.spacing = 2
-            sub.edgeInsets = NSEdgeInsets(top: 2, left: 28, bottom: 2, right: 0)
+        let outer = NSStackView(views: [line, subStack])
+        outer.orientation = .vertical
+        outer.alignment = .leading
+        outer.spacing = 4
+        outer.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(outer)
+        NSLayoutConstraint.activate([
+            outer.topAnchor.constraint(equalTo: topAnchor),
+            outer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            outer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            outer.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    @objc private func toggle() {
+        expanded.toggle()
+        subStack.isHidden = !expanded
+        disclosure?.title = expanded ? "▾" : "▸"
+        onToggle?()
+    }
+
+    func update(_ row: IslandPanel.Row) {
+        titleLabel.stringValue = row.title
+        titleLabel.textColor = row.dimmed ? .secondaryLabelColor : .labelColor
+        stateLabel.stringValue = row.state
+        stateLabel.textColor = row.dimmed ? .tertiaryLabelColor : row.color
+        glyph.stringValue = row.glyph
+
+        // Disclosure + sub-rows (rebuild contents each update; preserve expanded state).
+        let hasSubs = !row.subRows.isEmpty
+        disclosure?.isHidden = !hasSubs
+        subStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if hasSubs {
             for s in row.subRows {
                 let sl = NSTextField(labelWithString: "\(s.glyph)  \(s.text)")
                 sl.font = .systemFont(ofSize: 11)
                 sl.textColor = .secondaryLabelColor
-                sub.addArrangedSubview(sl)
+                subStack.addArrangedSubview(sl)
             }
-            sub.isHidden = true
-            outer.addArrangedSubview(sub)
-            if let disclosure = line.arrangedSubviews.first as? NSButton {
-                disclosures[ObjectIdentifier(disclosure)] = sub
-            }
+            subStack.isHidden = !expanded
+        } else {
+            subStack.isHidden = true
         }
-
-        if row.pulsing { addPulse(to: glyph) }
-        return outer
+        applyAnimations(for: row)
     }
 
-    @objc private func toggleDisclosure(_ sender: NSButton) {
-        guard let sub = disclosures[ObjectIdentifier(sender)] else { return }
-        sub.isHidden.toggle()
-        sender.title = sub.isHidden ? "▸" : "▾"
-        resizeAndReposition()
-    }
-
-    private func addPulse(to view: NSView) {
-        view.wantsLayer = true
-        let pulse = CABasicAnimation(keyPath: "opacity")
-        pulse.fromValue = 1.0
-        pulse.toValue = 0.4
-        pulse.duration = 0.85
-        pulse.autoreverses = true
-        pulse.repeatCount = .infinity
-        view.layer?.add(pulse, forKey: "pulse")
-    }
+    // Replaced with the full body in Task 9; intentionally a no-op for now.
+    private func applyAnimations(for row: IslandPanel.Row) {}
 }
