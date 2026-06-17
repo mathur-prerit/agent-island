@@ -8,13 +8,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "Building AgentIslandApp (release)…"
+echo "Building AgentIslandApp + daemon + hook bridge (release)…"
 swift build -c release --product AgentIslandApp
+swift build -c release --product agentislandd
+swift build -c release --product AgentIslandHookCLI
 
 APP="$ROOT/build/AgentIsland.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/.build/release/AgentIslandApp" "$APP/Contents/MacOS/AgentIsland"
+# Siblings next to the app executable so EventDrivenSetup can resolve them by name
+# (event-driven mode: the hook relay command + the daemon spawn).
+cp "$ROOT/.build/release/agentislandd" "$APP/Contents/MacOS/agentislandd"
+cp "$ROOT/.build/release/AgentIslandHookCLI" "$APP/Contents/MacOS/AgentIslandHookCLI"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

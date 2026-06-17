@@ -2,7 +2,7 @@
 
 A quirky, quiet, always-on-top macOS status **island** that watches your Claude Code sessions — including their nested sub-agents — and shows, per session, whether each is **working**, **waiting for you**, or **done**, plus a one-line "what it's doing." Each session wears a randomized **persona** (Pirate, Astronaut, Herald, …); working sessions spin with a live step count; it's muted by default and stays out of your way.
 
-> **Status:** working v0 — menu-bar item + floating island, personas, the running spinner/step count, and an optional event-driven daemon are all in. Verified core logic with 82 self-test checks. Polish and a settings UI are ongoing.
+> **Status:** working v0 — menu-bar item + floating island with lively per-state animations, personas, live step + token counts, needs-you-first ordering, and an event-driven daemon (the default, via a reversible first-launch setup) are all in. Verified core logic with 93 self-test checks. A settings UI is still to come.
 
 ## Requirements
 
@@ -43,13 +43,13 @@ agent-island
 
 ### After launching
 
-- A small glyph appears in your **menu bar** (top-right): `○` idle · `◐` working · `● N` N sessions waiting on you. Click it for the session list and a **Show floating island** toggle / **Quit**.
-- The **floating island** sits at the top-right, one row per active session (touched in the last 30 min): persona glyph, project name, and state. **Working** rows spin with a live step count; **waiting** rows pulse; **done** rows are dimmed. Click a row's `▸` to expand its sub-agents.
+- A small glyph appears in your **menu bar** (top-right), colored by aggregate state: gray `○` idle · teal `◐` working · red, gently pulsing `● N` when N sessions wait on you. Click it for the session list, a **Show floating island** toggle, an **Event-driven mode** toggle, and **Quit**.
+- The **floating island** sits at the top-right, one row per active session (touched in the last 30 min): persona glyph, project name, and state. **Working** rows show a rotating aurora ring with a live `N steps · T tok` line (steps = tool calls; tokens = this session's input+output). **Waiting** rows pulse — gently when awaiting your next prompt, urgently (❗, sorted to the top) when blocked on a tool/permission approval. **Done** rows pop, then dim. All motion respects macOS **Reduce Motion**. Click a row's `▸` to expand its sub-agents.
 - **Quit** from the menu-bar item (or `⌘Q`).
 
-## Event-driven mode (optional)
+## Event-driven mode
 
-By default the app polls your transcripts every few seconds. To switch to event-driven updates (lower overhead, instant), run the daemon and register the Claude Code hooks:
+On first launch the app offers to **enable event-driven mode** — it installs the Claude Code hooks into `~/.claude/settings.json` (safe: backup + atomic write) and starts the `agentislandd` daemon for you. This gives instant updates plus the precise "needs your action" state and the done flourish. Decline and it polls every few seconds instead; toggle it anytime from the menu-bar item ▸ **Event-driven mode**. You can also set it up manually:
 
 ```sh
 # 1. register hooks in ~/.claude/settings.json (safe: backup + atomic write; undo with `uninstall`)
