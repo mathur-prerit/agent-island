@@ -3,9 +3,9 @@ import QuartzCore
 
 /// The always-on-top "island": a borderless, non-activating floating panel anchored at
 /// the screen edge that never steals keyboard focus and stays visible over fullscreen
-/// apps (the verified incantation). Renders per-session rows with a colored state dot +
-/// persona glyph, a pulse on waiting rows, click-to-expand sub-agents, and a dimmed
-/// "tombstone" style for finished sessions. Self-sizes to its content.
+/// apps. Renders each session as a two-line cell — bold title (project name) + a
+/// state line in the persona's color — with a persona glyph, a pulse on waiting rows,
+/// dimmed "tombstone" styling for finished, and click-to-expand sub-agents.
 final class IslandPanel: NSPanel {
     private let container = NSVisualEffectView()
     private let stack = NSStackView()
@@ -19,17 +19,17 @@ final class IslandPanel: NSPanel {
     }
 
     struct Row {
-        let glyph: String; let color: NSColor; let text: String
+        let glyph: String; let color: NSColor; let title: String; let state: String
         let pulsing: Bool; let dimmed: Bool; let subRows: [SubRow]
-        init(glyph: String, color: NSColor, text: String,
+        init(glyph: String, color: NSColor, title: String, state: String,
              pulsing: Bool = false, dimmed: Bool = false, subRows: [SubRow] = []) {
-            self.glyph = glyph; self.color = color; self.text = text
+            self.glyph = glyph; self.color = color; self.title = title; self.state = state
             self.pulsing = pulsing; self.dimmed = dimmed; self.subRows = subRows
         }
     }
 
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 340, height: 80),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 320, height: 80),
                    styleMask: [.nonactivatingPanel, .borderless, .fullSizeContentView],
                    backing: .buffered, defer: false)
         isFloatingPanel = true
@@ -46,13 +46,13 @@ final class IslandPanel: NSPanel {
         container.blendingMode = .behindWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 14
+        container.layer?.cornerRadius = 16
         container.layer?.masksToBounds = true
 
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 13, left: 16, bottom: 13, right: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -70,7 +70,10 @@ final class IslandPanel: NSPanel {
     func update(rows: [Row]) {
         disclosures.removeAll()
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        stack.addArrangedSubview(headerLabel("◍ agent-island"))
+        let header = NSTextField(labelWithString: "agent-island")
+        header.font = .systemFont(ofSize: 11, weight: .semibold)
+        header.textColor = .tertiaryLabelColor
+        stack.addArrangedSubview(header)
         for row in rows { stack.addArrangedSubview(sessionView(row)) }
         resizeAndReposition()
     }
@@ -78,7 +81,7 @@ final class IslandPanel: NSPanel {
     private func resizeAndReposition() {
         container.layoutSubtreeIfNeeded()
         let fitting = stack.fittingSize
-        let size = NSSize(width: max(300, fitting.width), height: max(40, fitting.height))
+        let size = NSSize(width: max(260, fitting.width), height: max(40, fitting.height))
         var frame = NSRect(origin: .zero, size: size)
         if let visible = NSScreen.main?.visibleFrame {
             frame.origin = NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16)
@@ -87,45 +90,65 @@ final class IslandPanel: NSPanel {
     }
 
     private func sessionView(_ row: Row) -> NSView {
-        let vertical = NSStackView()
-        vertical.orientation = .vertical
-        vertical.alignment = .leading
-        vertical.spacing = 3
+        let outer = NSStackView()
+        outer.orientation = .vertical
+        outer.alignment = .leading
+        outer.spacing = 4
 
-        let header = NSStackView()
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 6
+        let line = NSStackView()
+        line.orientation = .horizontal
+        line.alignment = .centerY
+        line.spacing = 9
 
         if !row.subRows.isEmpty {
             let disclosure = NSButton(title: "▸", target: self, action: #selector(toggleDisclosure(_:)))
             disclosure.isBordered = false
-            disclosure.font = .systemFont(ofSize: 11)
-            header.addArrangedSubview(disclosure)
+            disclosure.font = .systemFont(ofSize: 9)
+            disclosure.contentTintColor = .tertiaryLabelColor
+            line.addArrangedSubview(disclosure)
         }
-        header.addArrangedSubview(dot(row.color))
-        header.addArrangedSubview(label("\(row.glyph)  \(row.text)",
-                                        color: row.dimmed ? .secondaryLabelColor : row.color))
-        vertical.addArrangedSubview(header)
+
+        let glyph = NSTextField(labelWithString: row.glyph)
+        glyph.font = .systemFont(ofSize: 16)
+        line.addArrangedSubview(glyph)
+
+        let cell = NSStackView()
+        cell.orientation = .vertical
+        cell.alignment = .leading
+        cell.spacing = 1
+        let title = NSTextField(labelWithString: row.title)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = row.dimmed ? .secondaryLabelColor : .labelColor
+        let state = NSTextField(labelWithString: row.state)
+        state.font = .systemFont(ofSize: 11, weight: .regular)
+        state.textColor = row.dimmed ? .tertiaryLabelColor : row.color
+        cell.addArrangedSubview(title)
+        cell.addArrangedSubview(state)
+        line.addArrangedSubview(cell)
+
+        outer.addArrangedSubview(line)
 
         if !row.subRows.isEmpty {
             let sub = NSStackView()
             sub.orientation = .vertical
             sub.alignment = .leading
             sub.spacing = 2
-            sub.edgeInsets = NSEdgeInsets(top: 0, left: 24, bottom: 2, right: 0)
+            sub.edgeInsets = NSEdgeInsets(top: 2, left: 28, bottom: 2, right: 0)
             for s in row.subRows {
-                sub.addArrangedSubview(label("\(s.glyph)  \(s.text)", color: s.color, size: 11))
+                let sl = NSTextField(labelWithString: "\(s.glyph)  \(s.text)")
+                sl.font = .systemFont(ofSize: 11)
+                sl.textColor = .secondaryLabelColor
+                sub.addArrangedSubview(sl)
             }
             sub.isHidden = true
-            vertical.addArrangedSubview(sub)
-            if let disclosure = header.arrangedSubviews.first as? NSButton {
+            outer.addArrangedSubview(sub)
+            if let disclosure = line.arrangedSubviews.first as? NSButton {
                 disclosures[ObjectIdentifier(disclosure)] = sub
             }
         }
 
-        if row.pulsing { addPulse(to: header) }
-        return vertical
+        if row.pulsing { addPulse(to: glyph) }
+        return outer
     }
 
     @objc private func toggleDisclosure(_ sender: NSButton) {
@@ -139,37 +162,10 @@ final class IslandPanel: NSPanel {
         view.wantsLayer = true
         let pulse = CABasicAnimation(keyPath: "opacity")
         pulse.fromValue = 1.0
-        pulse.toValue = 0.45
-        pulse.duration = 0.8
+        pulse.toValue = 0.4
+        pulse.duration = 0.85
         pulse.autoreverses = true
         pulse.repeatCount = .infinity
         view.layer?.add(pulse, forKey: "pulse")
-    }
-
-    private func dot(_ color: NSColor) -> NSView {
-        let v = NSView()
-        v.translatesAutoresizingMaskIntoConstraints = false
-        v.wantsLayer = true
-        v.layer?.backgroundColor = color.cgColor
-        v.layer?.cornerRadius = 4
-        NSLayoutConstraint.activate([
-            v.widthAnchor.constraint(equalToConstant: 8),
-            v.heightAnchor.constraint(equalToConstant: 8),
-        ])
-        return v
-    }
-
-    private func headerLabel(_ s: String) -> NSTextField {
-        let l = NSTextField(labelWithString: s)
-        l.font = .systemFont(ofSize: 12, weight: .semibold)
-        l.textColor = .secondaryLabelColor
-        return l
-    }
-
-    private func label(_ s: String, color: NSColor, size: CGFloat = 12) -> NSTextField {
-        let l = NSTextField(labelWithString: s)
-        l.font = .monospacedSystemFont(ofSize: size, weight: .regular)
-        l.textColor = color
-        return l
     }
 }

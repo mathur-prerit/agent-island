@@ -5,15 +5,10 @@ import PersonaKit
 import AgentIslandDaemon
 
 // agent-island v0 app: a menu-bar (accessory) item plus an always-on-top floating
-// "island" panel. Both list your active Claude Code sessions and their derived state,
-// polled from ~/.claude transcripts via the verified AgentIslandCore, and each session
-// wears a persona (PersonaKit) locked to it for the session. Plain SwiftPM executable:
-//
-//   swift run AgentIslandApp          # or pick the AgentIslandApp scheme in Xcode and Run
-//
-// Color stays core-owned (legibility); personas vary only glyph + wording. The island
-// appears (top-right) only while sessions are active; toggle it or quit from the menu.
-// Polling is a v0 shortcut — the daemon + hooks will replace it with event-driven updates.
+// "island" panel. Both list active Claude Code sessions and their derived state, polled
+// from ~/.claude transcripts via the verified AgentIslandCore (or read from the daemon's
+// state.json when it's running). Each session wears a persona (PersonaKit). Plain
+// SwiftPM executable: `swift run AgentIslandApp`.
 
 final class AppController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -24,19 +19,20 @@ final class AppController: NSObject {
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
-    private let activeWindow: TimeInterval = 600  // a session touched within 10 min is "active"
+    private let activeWindow: TimeInterval = 1800  // a session touched within 30 min is "active"
     private let pool = BuiltInPersonas.all
 
-    private struct Session { let fullID: String; let shortID: String; let status: AgentStatus; let subStatuses: [AgentStatus] }
+    private struct Session {
+        let fullID: String; let shortID: String; let label: String
+        let status: AgentStatus; let subStatuses: [AgentStatus]
+    }
 
     func start() {
         statusItem.button?.title = "○"
         menu.autoenablesItems = false
         statusItem.menu = menu
         refresh()
-        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.refresh()
-        }
+        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -44,44 +40,42 @@ final class AppController: NSObject {
     private func refresh() {
         let sessions = activeSessions()
 
-        // Menu-bar dropdown
         menu.removeAllItems()
         if sessions.isEmpty {
-            menu.addItem(infoItem("No active Claude Code sessions"))
+            menu.addItem(infoItem("No active sessions (last 30 min)"))
         } else {
             menu.addItem(infoItem("Active sessions"))
             for s in sessions { menu.addItem(infoItem(rowText(for: s))) }
         }
         menu.addItem(.separator())
         let toggle = NSMenuItem(title: "Show floating island", action: #selector(toggleIsland), keyEquivalent: "")
-        toggle.target = self
-        toggle.isEnabled = true
-        toggle.state = islandEnabled ? .on : .off
+        toggle.target = self; toggle.isEnabled = true; toggle.state = islandEnabled ? .on : .off
         menu.addItem(toggle)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agent-island", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        quit.isEnabled = true
+        quit.target = self; quit.isEnabled = true
         menu.addItem(quit)
 
-        // Menu-bar glyph reflects the most-urgent state (core glyphs, not persona-specific).
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
         statusItem.button?.title = waiting > 0 ? "● \(waiting)" : (working ? "◐" : "○")
 
-        // Floating island
-        if islandEnabled && !sessions.isEmpty {
-            let rows = sessions.map { s -> IslandPanel.Row in
-                let skin = persona(for: s).skin(for: s.status)
-                let subRows = s.subStatuses.map {
-                    IslandPanel.SubRow(glyph: "↳", color: color($0), text: subDescribe($0))
+        if islandEnabled {
+            let rows: [IslandPanel.Row]
+            if sessions.isEmpty {
+                rows = [IslandPanel.Row(glyph: "·", color: .tertiaryLabelColor,
+                                        title: "idle", state: "no active sessions (last 30 min)")]
+            } else {
+                rows = sessions.map { s -> IslandPanel.Row in
+                    let skin = persona(for: s).skin(for: s.status)
+                    let subRows = s.subStatuses.map {
+                        IslandPanel.SubRow(glyph: "↳", color: color($0), text: subDescribe($0))
+                    }
+                    return IslandPanel.Row(glyph: skin.glyph, color: color(s.status),
+                                           title: s.label, state: skin.label,
+                                           pulsing: isWaiting(s.status), dimmed: isFinished(s.status),
+                                           subRows: subRows)
                 }
-                return IslandPanel.Row(glyph: skin.glyph,
-                                       color: color(s.status),
-                                       text: "\(s.shortID)  —  \(skin.label)",
-                                       pulsing: isWaiting(s.status),
-                                       dimmed: isFinished(s.status),
-                                       subRows: subRows)
             }
             island.update(rows: rows)
             island.orderFrontRegardless()
@@ -90,10 +84,9 @@ final class AppController: NSObject {
         }
     }
 
-    private func rowText(for s: Session, includeGlyph: Bool = true) -> String {
+    private func rowText(for s: Session) -> String {
         let skin = persona(for: s).skin(for: s.status)
-        let prefix = includeGlyph ? "\(skin.glyph)  " : ""
-        return "\(prefix)\(s.shortID)  —  \(skin.label)"
+        return "\(skin.glyph)  \(s.label)  —  \(skin.label)"
     }
 
     private func persona(for s: Session) -> Persona {
@@ -109,13 +102,10 @@ final class AppController: NSObject {
     @objc private func quit() { NSApplication.shared.terminate(nil) }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
 
-    // MARK: - Derivation from real transcripts
+    // MARK: - Sessions (daemon state if running, else poll transcripts)
 
-    private func activeSessions() -> [Session] {
-        daemonSessions() ?? polledSessions()
-    }
+    private func activeSessions() -> [Session] { daemonSessions() ?? polledSessions() }
 
-    /// Event-driven: read the daemon's state.json when it's fresh (daemon running).
     private func daemonSessions() -> [Session]? {
         let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
         guard let attrs = try? fm.attributesOfItem(atPath: statePath),
@@ -127,12 +117,12 @@ final class AppController: NSObject {
         return state.sessions.map { snap in
             var subs: [AgentStatus] = Array(repeating: .working, count: snap.subActive)
             subs += Array(repeating: .finished(.success), count: snap.subDone)
-            return Session(fullID: snap.sessionID, shortID: String(snap.sessionID.prefix(8)),
+            let short = String(snap.sessionID.prefix(8))
+            return Session(fullID: snap.sessionID, shortID: short, label: short,
                            status: AgentStatus(stateToken: snap.state), subStatuses: subs)
         }
     }
 
-    /// Fallback: poll ~/.claude transcripts directly when the daemon isn't running.
     private func polledSessions() -> [Session] {
         guard let projects = try? fm.contentsOfDirectory(atPath: projectsDir) else { return [] }
         let cutoff = Date().addingTimeInterval(-activeWindow)
@@ -146,12 +136,15 @@ final class AppController: NSObject {
                 let p = "\(projPath)/\(entry)"
                 let mtime = ((try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date) ?? .distantPast
                 guard mtime >= cutoff else { continue }
-                let records = TranscriptAdapter.parse(lines: readLines(p))
+                let lines = readLines(p)
+                let records = TranscriptAdapter.parse(lines: lines)
                 let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
                 let subs = subAgentStatuses(forSession: p)
                 let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
-                found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)), status: rolled, subStatuses: subs), mtime))
+                let label = projectName(fromLines: lines) ?? String(fullID.prefix(8))
+                found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
+                                      label: label, status: rolled, subStatuses: subs), mtime))
             }
         }
         return found.sorted { $0.mtime > $1.mtime }.map(\.session)
@@ -175,12 +168,28 @@ final class AppController: NSObject {
             .split(separator: "\n", omittingEmptySubsequences: true).map(String.init) ?? []
     }
 
-    private func isWaiting(_ s: AgentStatus) -> Bool {
-        if case .waitingForInput = s { return true } else { return false }
+    /// Friendly label from the transcript's cwd (the project folder), else a short id.
+    private func projectName(fromLines lines: [String]) -> String? {
+        for line in lines.prefix(80) {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let cwd = obj["cwd"] as? String, !cwd.isEmpty else { continue }
+            let name = (cwd as NSString).lastPathComponent
+            return name.isEmpty ? nil : name
+        }
+        return nil
     }
 
-    private func isFinished(_ s: AgentStatus) -> Bool {
-        if case .finished = s { return true } else { return false }
+    private func isWaiting(_ s: AgentStatus) -> Bool { if case .waitingForInput = s { return true } else { return false } }
+    private func isFinished(_ s: AgentStatus) -> Bool { if case .finished = s { return true } else { return false } }
+
+    private func color(_ s: AgentStatus) -> NSColor {
+        switch s {
+        case .working: return .systemYellow
+        case .waitingForInput: return .systemRed
+        case .finished(.failed): return .systemRed
+        case .finished: return .systemGreen
+        }
     }
 
     private func subDescribe(_ s: AgentStatus) -> String {
@@ -189,15 +198,6 @@ final class AppController: NSObject {
         case .waitingForInput: return "sub-agent · waiting"
         case .finished(.failed): return "sub-agent · failed"
         case .finished: return "sub-agent · done"
-        }
-    }
-
-    private func color(_ s: AgentStatus) -> NSColor {
-        switch s {
-        case .working: return .systemYellow
-        case .waitingForInput: return .systemRed
-        case .finished(.failed): return .systemRed
-        case .finished: return .systemGreen
         }
     }
 }
