@@ -215,6 +215,15 @@ check(TokenUsage.compact(1500) == "1.5k", "compact thousands one-decimal")
 check(TokenUsage.compact(146_000) == "146k", "compact tens-of-thousands integer k")
 check(TokenUsage.compact(2_870_000) == "2.9M", "compact millions one-decimal")
 
+// --- Project label (uses LAST cwd, not first — fixes the "preritmathur" bug) ---
+let cwdLines = [
+    #"{"type":"user","cwd":"/Users/preritmathur"}"#,
+    #"{"type":"assistant"}"#,
+    #"{"type":"user","cwd":"/Users/preritmathur/projects/prerit/agent-island"}"#,
+]
+check(ProjectLabel.fromTranscript(lines: cwdLines) == "agent-island", "label uses last cwd (project), not first (launch dir)")
+check(ProjectLabel.fromTranscript(lines: [#"{"type":"user"}"#]) == nil, "label nil when no cwd present")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")
