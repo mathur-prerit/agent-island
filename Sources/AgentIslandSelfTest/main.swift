@@ -224,6 +224,11 @@ let cwdLines = [
 check(ProjectLabel.fromTranscript(lines: cwdLines) == "agent-island", "label uses last cwd (project), not first (launch dir)")
 check(ProjectLabel.fromTranscript(lines: [#"{"type":"user"}"#]) == nil, "label nil when no cwd present")
 
+// --- Display priority: states that need you float to the top ---
+check(DisplayPriority.rank(.waitingForInput(.permission)) < DisplayPriority.rank(.waitingForInput(.stoppedTurn)), "permission outranks stopped-turn waiting")
+check(DisplayPriority.rank(.waitingForInput(.stoppedTurn)) < DisplayPriority.rank(.working), "any waiting outranks working")
+check(DisplayPriority.rank(.working) < DisplayPriority.rank(.finished(.success)), "working outranks finished")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")
