@@ -201,6 +201,16 @@ let daemonDecoded = try? JSONDecoder().decode(DaemonState.self, from: daemonEnco
 check(daemonDecoded == daemonState, "DaemonState JSON round-trips")
 check(AgentStatus.working.stateToken == "working" && AgentStatus(stateToken: "waiting") == .waitingForInput(.stoppedTurn), "AgentStatus <-> token mapping")
 
+// --- Token usage ---
+let usageLines = [
+    #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9999}}}"#,
+    #"{"type":"user"}"#,
+    "garbage{",
+    #"{"type":"assistant","usage":{"input_tokens":10,"output_tokens":5}}"#,
+]
+check(TokenUsage.freshTokens(lines: usageLines) == 165, "freshTokens sums input+output across both usage shapes, ignoring cache")
+check(TokenUsage.freshTokens(lines: []) == 0, "freshTokens empty -> 0")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")
