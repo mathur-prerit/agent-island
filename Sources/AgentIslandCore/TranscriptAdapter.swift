@@ -55,4 +55,26 @@ public enum TranscriptAdapter {
     public static func lastConversational(_ records: [TranscriptRecord]) -> TranscriptRecord? {
         records.reversed().first(where: { isConversational($0.type) })
     }
+
+    /// The text of the first `user` record — for a sub-agent transcript this is the task it was
+    /// dispatched with, making a good descriptive name. Handles both the plain-string content shape
+    /// and the content-blocks array (returns the first text block). nil if none found.
+    public static func firstUserText(lines: [String]) -> String? {
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["type"] as? String) == "user",
+                  let message = obj["message"] as? [String: Any]
+            else { continue }
+            if let s = (message["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !s.isEmpty { return s }
+            if let blocks = message["content"] as? [[String: Any]] {
+                for b in blocks where (b["type"] as? String) == "text" {
+                    if let t = (b["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !t.isEmpty { return t }
+                }
+            }
+        }
+        return nil
+    }
 }

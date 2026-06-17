@@ -36,6 +36,16 @@ final class IslandPanel: NSPanel {
     private var frameCount = 0
     private var theme: IslandTheme = Themes.named(UserDefaults.standard.string(forKey: "islandTheme"))
 
+    // User-dragged position, stored as the TOP-LEFT corner so the island keeps its top edge put as
+    // it grows/shrinks. nil = default top-right snap. `isProgrammaticMove` lets us ignore the
+    // windowDidMove fired by our own setFrame (only real user drags should persist a position).
+    private var userTopLeft: NSPoint?
+    private var isProgrammaticMove = false
+    private static let positionKey = "islandTopLeft"
+
+    /// Called when the user dismisses a finished row (via its ✕). Wired to the app's dismiss set.
+    var onDismiss: ((String) -> Void)?
+
     struct SubRow {
         let glyph: String; let color: NSColor; let text: String
         init(glyph: String, color: NSColor, text: String) {
@@ -48,12 +58,15 @@ final class IslandPanel: NSPanel {
         let glyph: String; let color: NSColor; let title: String; let state: String
         let spinning: Bool; let dimmed: Bool
         let waitReason: WaitReason?; let verdict: Verdict?; let tokens: Int; let subRows: [SubRow]
+        let detail: String?   // expanded-only session line (e.g. "📂 project"); also makes the row expandable
         init(id: String, glyph: String, color: NSColor, title: String, state: String,
              spinning: Bool = false, dimmed: Bool = false,
-             waitReason: WaitReason? = nil, verdict: Verdict? = nil, tokens: Int = 0, subRows: [SubRow] = []) {
+             waitReason: WaitReason? = nil, verdict: Verdict? = nil, tokens: Int = 0,
+             subRows: [SubRow] = [], detail: String? = nil) {
             self.id = id; self.glyph = glyph; self.color = color; self.title = title; self.state = state
             self.spinning = spinning; self.dimmed = dimmed
             self.waitReason = waitReason; self.verdict = verdict; self.tokens = tokens; self.subRows = subRows
+            self.detail = detail
         }
     }
 
@@ -67,8 +80,13 @@ final class IslandPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = true
-        // NOT movable-by-window-background — it intercepts header clicks, and the island
-        // re-snaps to the top-right on every refresh anyway.
+        // Draggable from any background area (the controls — header, disclosure, ✕ — handle their
+        // own clicks, so this doesn't swallow them). Once the user drags it, `windowDidMove`
+        // records the spot and `resizeAndReposition` stops re-snapping to the top-right.
+        isMovableByWindowBackground = true
+        if let saved = UserDefaults.standard.string(forKey: IslandPanel.positionKey) {
+            userTopLeft = NSPointFromString(saved)
+        }
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
@@ -126,6 +144,7 @@ final class IslandPanel: NSPanel {
             outerStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         contentView = container
+        delegate = self
     }
 
     override var canBecomeKey: Bool { true }
@@ -158,6 +177,7 @@ final class IslandPanel: NSPanel {
                 let v = SessionRowView()
                 v.theme = theme
                 v.onToggle = { [weak self] in self?.resizeAndReposition() }
+                v.onDismiss = { [weak self] id in self?.onDismiss?(id) }
                 rowViews[row.id] = v
                 return v
             }()
@@ -241,11 +261,41 @@ final class IslandPanel: NSPanel {
 
         let fitting = outerStack.fittingSize
         let size = NSSize(width: max(220, fitting.width), height: max(36, fitting.height))
-        var frame = NSRect(origin: .zero, size: size)
-        if let visible = NSScreen.main?.visibleFrame {
-            frame.origin = NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - size.height - 16)
-        }
-        setFrame(frame, display: true)
+        isProgrammaticMove = true
+        setFrame(NSRect(origin: desiredOrigin(for: size), size: size), display: true)
+        isProgrammaticMove = false
+    }
+
+    /// Bottom-left origin for a given size: pinned under the user's dragged top-left corner if they
+    /// moved it, else the default top-right. Always clamped to a visible screen so it can't get lost.
+    private func desiredOrigin(for size: NSSize) -> NSPoint {
+        let screen = screenForUserTopLeft() ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(origin: .zero, size: size)
+        let topLeft = userTopLeft ?? NSPoint(x: visible.maxX - size.width - 16, y: visible.maxY - 16)
+        let x = min(max(topLeft.x, visible.minX), max(visible.minX, visible.maxX - size.width))
+        let y = min(max(topLeft.y - size.height, visible.minY), max(visible.minY, visible.maxY - size.height))
+        return NSPoint(x: x, y: y)
+    }
+
+    private func screenForUserTopLeft() -> NSScreen? {
+        guard let tl = userTopLeft else { return nil }
+        return NSScreen.screens.first { $0.frame.contains(NSPoint(x: tl.x, y: tl.y - 1)) }
+    }
+
+    /// Forget the dragged position and snap back to the default top-right.
+    func resetPosition() {
+        userTopLeft = nil
+        UserDefaults.standard.removeObject(forKey: IslandPanel.positionKey)
+        resizeAndReposition()
+    }
+}
+
+extension IslandPanel: NSWindowDelegate {
+    func windowDidMove(_ notification: Notification) {
+        guard !isProgrammaticMove else { return }   // ignore our own setFrame; record only user drags
+        let topLeft = NSPoint(x: frame.minX, y: frame.maxY)
+        userTopLeft = topLeft
+        UserDefaults.standard.set(NSStringFromPoint(topLeft), forKey: IslandPanel.positionKey)
     }
 }
 
@@ -264,11 +314,13 @@ final class SessionRowView: NSView {
     private let cell = NSStackView()
     private let subStack = NSStackView()
     private let disclosure = FirstMouseButton(title: "▸", target: nil, action: nil)
+    private let closeButton = FirstMouseButton(title: "✕", target: nil, action: nil)  // dismiss a finished row
     private var expanded = false
     private var currentRow: IslandPanel.Row?
     var theme: IslandTheme = JourneyTheme()
 
     var onToggle: (() -> Void)?
+    var onDismiss: ((String) -> Void)?
     var isAnimating: Bool { currentRow.map { theme.animates($0) } ?? false }
 
     override init(frame: NSRect) {
@@ -289,7 +341,13 @@ final class SessionRowView: NSView {
         cueImage.imageScaling = .scaleProportionallyUpOrDown
         cueImage.setContentHuggingPriority(.required, for: .horizontal)
         cueImage.isHidden = true
+        // The road scene is a wide banner shown on its own row above the title — give it room so the
+        // vehicle, milestone signs and signal all read distinctly (it's cramped beside the text).
         cueRoad.isHidden = true
+        NSLayoutConstraint.activate([
+            cueRoad.widthAnchor.constraint(equalToConstant: 290),
+            cueRoad.heightAnchor.constraint(equalToConstant: 26),
+        ])
 
         glyph.font = .systemFont(ofSize: 16)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -307,12 +365,23 @@ final class SessionRowView: NSView {
         disclosure.font = .systemFont(ofSize: 9)
         disclosure.contentTintColor = .tertiaryLabelColor
 
+        closeButton.target = self
+        closeButton.action = #selector(dismissSelf)
+        closeButton.isBordered = false
+        closeButton.font = .systemFont(ofSize: 10)
+        closeButton.contentTintColor = .tertiaryLabelColor
+        closeButton.isHidden = true                  // only finished rows are dismissable
+        closeButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Small inline cues (CLI spinner/caret, idle/finished icons) sit beside the title; the wide
+        // road banner (cueRoad) lives on its own row above, added to `outer` below. The ✕ trails the
+        // cell so a finished row can be removed.
         line.addArrangedSubview(disclosure)
         line.addArrangedSubview(cueText)
         line.addArrangedSubview(cueImage)
-        line.addArrangedSubview(cueRoad)
         line.addArrangedSubview(glyph)
         line.addArrangedSubview(cell)
+        line.addArrangedSubview(closeButton)
 
         subStack.orientation = .vertical
         subStack.alignment = .leading
@@ -320,7 +389,7 @@ final class SessionRowView: NSView {
         subStack.edgeInsets = NSEdgeInsets(top: 2, left: 28, bottom: 2, right: 0)
         subStack.isHidden = true
 
-        let outer = NSStackView(views: [line, subStack])
+        let outer = NSStackView(views: [cueRoad, line, subStack])
         outer.orientation = .vertical
         outer.alignment = .leading
         outer.spacing = 4
@@ -344,6 +413,8 @@ final class SessionRowView: NSView {
         onToggle?()
     }
 
+    @objc private func dismissSelf() { if let id = currentRow?.id { onDismiss?(id) } }
+
     func update(_ row: IslandPanel.Row) {
         titleLabel.stringValue = row.title
         titleLabel.textColor = row.dimmed ? .secondaryLabelColor : .labelColor
@@ -354,14 +425,23 @@ final class SessionRowView: NSView {
 
         // Per-state background tint + the theme's status cue.
         currentRow = row
+        closeButton.isHidden = (row.verdict == nil)   // only finished/failed rows can be dismissed
         layer?.backgroundColor = theme.tint(for: row).withAlphaComponent(0.13).cgColor
         renderIndicator(frame: 0)
 
-        // Disclosure + sub-rows (rebuild contents each update; preserve expanded state).
-        let hasSubs = !row.subRows.isEmpty
-        disclosure.isHidden = !hasSubs
+        // Disclosure + expanded detail: a session line (project name) plus rich sub-agent rows.
+        // The row is expandable whenever there's any detail — so even a solo running session with
+        // no sub-agents still gets a disclosure triangle.
+        let hasDetail = (row.detail != nil) || !row.subRows.isEmpty
+        disclosure.isHidden = !hasDetail
         subStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        if hasSubs {
+        if hasDetail {
+            if let detail = row.detail {
+                let dl = NSTextField(labelWithString: detail)
+                dl.font = .systemFont(ofSize: 11, weight: .medium)
+                dl.textColor = .secondaryLabelColor
+                subStack.addArrangedSubview(dl)
+            }
             for s in row.subRows {
                 let sl = NSTextField(labelWithString: "\(s.glyph)  \(s.text)")
                 sl.font = .systemFont(ofSize: 11)
@@ -389,8 +469,9 @@ final class SessionRowView: NSView {
             cueImage.image = image
             cueImage.contentTintColor = tint   // nil → the image draws with its own colours
             show(cueImage)
-        case let .road(tokens):
+        case let .road(tokens, mode):
             cueRoad.tokens = tokens
+            cueRoad.mode = mode
             cueRoad.frame_ = f
             show(cueRoad)
         }

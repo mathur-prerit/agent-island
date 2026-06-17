@@ -17,6 +17,7 @@ final class AppController: NSObject {
     private let island = IslandPanel()
     private var timer: Timer?
     private var islandEnabled = true
+    private var dismissedFinished: Set<String> = []   // finished sessions the user removed from view
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -25,14 +26,17 @@ final class AppController: NSObject {
 
     private struct Session {
         let fullID: String; let shortID: String; let label: String
-        let status: AgentStatus; let subStatuses: [AgentStatus]; let steps: Int
+        let title: String?                       // conversation ai-title, if any
+        let status: AgentStatus; let subDigests: [SubagentDigest]; let steps: Int
         let tokens: Int
+        let startedAt: Date?                      // first transcript record time → running time
     }
 
     func start() {
         statusItem.button?.title = "○"
         menu.autoenablesItems = false
         statusItem.menu = menu
+        island.onDismiss = { [weak self] id in self?.dismissFinished(id) }
         refresh()
         // Create the timer UNSCHEDULED and register it only in .common mode.
         // `Timer.scheduledTimer` already registers the timer in .default mode; adding
@@ -48,7 +52,12 @@ final class AppController: NSObject {
     }
 
     private func refresh() {
-        let sessions = activeSessions()
+        var sessions = activeSessions()
+        // Hide finished rows the user dismissed. Keep the dismissed set pruned to ids that are still
+        // present AND still finished, so a session that resumes work (or a brand-new one) reappears.
+        let finishedIDs = Set(sessions.filter { isFinished($0.status) }.map { $0.fullID })
+        dismissedFinished.formIntersection(finishedIDs)
+        sessions = sessions.filter { !dismissedFinished.contains($0.fullID) }
 
         menu.removeAllItems()
         if sessions.isEmpty {
@@ -78,6 +87,15 @@ final class AppController: NSObject {
         }
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
+
+        menu.addItem(.separator())
+        let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
+        clear.target = self
+        clear.isEnabled = sessions.contains { isFinished($0.status) }
+        menu.addItem(clear)
+        let reset = NSMenuItem(title: "Reset island position", action: #selector(resetIslandPosition), keyEquivalent: "")
+        reset.target = self; reset.isEnabled = true
+        menu.addItem(reset)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agent-island", action: #selector(quit), keyEquivalent: "q")
@@ -114,6 +132,7 @@ final class AppController: NSObject {
                 rows = [IslandPanel.Row(id: "idle", glyph: "·", color: .tertiaryLabelColor,
                                         title: "idle", state: "no active sessions (last 30 min)")]
             } else {
+                let now = Date()
                 rows = sessions.map { s -> IslandPanel.Row in
                     let skin = persona(for: s).skin(for: s.status)
                     let isWorking = (s.status == .working)
@@ -121,17 +140,27 @@ final class AppController: NSObject {
                     var parts: [String] = [skin.label]
                     if isWorking && s.steps > 0 { parts.append("\(s.steps) steps") }
                     if !isFinished(s.status) && s.tokens > 0 { parts.append("\(TokenUsage.compact(s.tokens)) tok") }
+                    if !isFinished(s.status), let start = s.startedAt {
+                        parts.append(TranscriptClock.elapsedLabel(from: start, to: now))   // running time
+                    }
                     var stateText = parts.joined(separator: " · ")
                     if reason == .permission { stateText = "❗ " + stateText }
-                    let subRows = s.subStatuses.map {
-                        IslandPanel.SubRow(glyph: "↳", color: color($0), text: subDescribe($0))
+                    // Title = the conversation's ai-title when known (more descriptive than the
+                    // project name); the project name moves into the expanded detail line.
+                    let title = s.title.map { TaskLineSanitizer.sanitize($0, maxLength: 36) } ?? s.label
+                    let detail = "📂 \(s.label)"   // project name (the title line now shows the ai-title)
+                    let subRows = s.subDigests.map { d -> IslandPanel.SubRow in
+                        var bits = [d.name]
+                        if d.tokens > 0 { bits.append("\(TokenUsage.compact(d.tokens)) tok") }
+                        if let dur = d.durationSeconds { bits.append(TranscriptClock.durationLabel(dur)) }
+                        return IslandPanel.SubRow(glyph: "↳", color: color(d.status), text: bits.joined(separator: " · "))
                     }
                     return IslandPanel.Row(id: s.fullID, glyph: skin.glyph, color: color(s.status),
-                                           title: s.label, state: stateText,
+                                           title: title, state: stateText,
                                            spinning: isWorking,
                                            dimmed: !isWorking,  // only the running row stays bright
                                            waitReason: reason, verdict: verdict(s.status),
-                                           tokens: s.tokens, subRows: subRows)
+                                           tokens: s.tokens, subRows: subRows, detail: detail)
                 }
             }
             island.update(rows: rows)
@@ -158,6 +187,14 @@ final class AppController: NSObject {
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
+
+    // Remove a single finished session from view (its ✕), or all finished at once (menu).
+    private func dismissFinished(_ id: String) { dismissedFinished.insert(id); refresh() }
+    @objc private func clearFinished() {
+        dismissedFinished.formUnion(activeSessions().filter { isFinished($0.status) }.map { $0.fullID })
+        refresh()
+    }
+    @objc private func resetIslandPosition() { island.resetPosition() }
 
     @objc private func pickTheme(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
@@ -234,22 +271,31 @@ final class AppController: NSObject {
               let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
               let state = try? JSONDecoder().decode(DaemonState.self, from: data) else { return nil }
         return state.sessions.map { snap in
-            var subs: [AgentStatus] = Array(repeating: .working, count: snap.subActive)
-            subs += Array(repeating: .finished(.success), count: snap.subDone)
             let short = String(snap.sessionID.prefix(8))
-            let tokens = snap.cwd.map { daemonTokens(cwd: $0, sessionID: snap.sessionID) } ?? 0
+            // The daemon tracks state only; everything transcript-derived (tokens, title, start
+            // time, per-sub-agent detail) is computed app-side from the transcript, read once.
+            let path = snap.cwd.map { transcriptPath(cwd: $0, sessionID: snap.sessionID) }
+            let lines = path.map { readLines($0) } ?? []
+            let tokens = TokenUsage.freshTokens(lines: lines)
+            let title = ConversationTitle.fromTranscript(lines: lines)
+            let startedAt = TranscriptClock.startedAt(lines: lines)
+            var digests = path.map { subagentDigests(forTranscript: $0) } ?? []
+            // If the sub-agent transcripts aren't on disk yet, fall back to the daemon's
+            // running/done counts as nameless placeholders so the tally still shows.
+            if digests.isEmpty, snap.subActive + snap.subDone > 0 {
+                digests = Array(repeating: SubagentDigest(name: "sub-agent", status: .working, tokens: 0, durationSeconds: nil), count: snap.subActive)
+                    + Array(repeating: SubagentDigest(name: "sub-agent", status: .finished(.success), tokens: 0, durationSeconds: nil), count: snap.subDone)
+            }
             return Session(fullID: snap.sessionID, shortID: short, label: snap.label ?? short,
-                           status: AgentStatus(stateToken: snap.state), subStatuses: subs, steps: 0,
-                           tokens: tokens)
+                           title: title, status: AgentStatus(stateToken: snap.state),
+                           subDigests: digests, steps: 0, tokens: tokens, startedAt: startedAt)
         }
     }
 
-    /// Fresh-token count for a daemon session, read from its transcript. The transcript lives at
-    /// ~/.claude/projects/<cwd with "/"→"-">/<sessionID>.jsonl. (The daemon tracks state, not
-    /// tokens, so the app computes them the same way the polling path does.)
-    private func daemonTokens(cwd: String, sessionID: String) -> Int {
+    /// Path to a session's transcript: ~/.claude/projects/<cwd with "/"→"-">/<sessionID>.jsonl.
+    private func transcriptPath(cwd: String, sessionID: String) -> String {
         let encoded = cwd.replacingOccurrences(of: "/", with: "-")
-        return TokenUsage.freshTokens(lines: readLines("\(projectsDir)/\(encoded)/\(sessionID).jsonl"))
+        return "\(projectsDir)/\(encoded)/\(sessionID).jsonl"
     }
 
     private func polledSessions() -> [Session] {
@@ -268,8 +314,8 @@ final class AppController: NSObject {
                 let lines = readLines(p)
                 let records = TranscriptAdapter.parse(lines: lines)
                 let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
-                let subs = subAgentStatuses(forSession: p)
-                var rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
+                let digests = subagentDigests(forTranscript: p)
+                var rolled = Rollup.rollUp(session: sessionStatus, subAgents: digests.map(\.status))
                 // A session stopped (waiting) but quiet >10 min reads as idle, not "waiting on
                 // you" — mirrors the daemon's idle downgrade. (Polling still can't tell a truly
                 // closed session from a long wait, but at least it stops nagging.)
@@ -278,11 +324,13 @@ final class AppController: NSObject {
                 }
                 let steps = records.reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
                 let tokens = TokenUsage.freshTokens(lines: lines)
+                let title = ConversationTitle.fromTranscript(lines: lines)
+                let startedAt = TranscriptClock.startedAt(lines: lines)
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
                 let label = ProjectLabel.fromTranscript(lines: lines) ?? String(fullID.prefix(8))
                 found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
-                                      label: label, status: rolled, subStatuses: subs, steps: steps,
-                                      tokens: tokens), mtime))
+                                      label: label, title: title, status: rolled, subDigests: digests,
+                                      steps: steps, tokens: tokens, startedAt: startedAt), mtime))
             }
         }
         return found
@@ -293,15 +341,16 @@ final class AppController: NSObject {
             .map(\.session)
     }
 
-    private func subAgentStatuses(forSession sessionPath: String) -> [AgentStatus] {
+    /// Per-sub-agent digests for a session, parsed from its `subagents/agent-*.jsonl` transcripts.
+    /// Used in both daemon and polling modes (the daemon only tracks counts).
+    private func subagentDigests(forTranscript sessionPath: String) -> [SubagentDigest] {
         let subDir = (sessionPath as NSString).deletingPathExtension + "/subagents"
         guard let walker = fm.enumerator(atPath: subDir) else { return [] }
-        var out: [AgentStatus] = []
+        var out: [SubagentDigest] = []
         for case let rel as String in walker {
             let name = (rel as NSString).lastPathComponent
             guard name.hasPrefix("agent-"), name.hasSuffix(".jsonl") else { continue }
-            out.append(StateEngine.deriveStatus(records: TranscriptAdapter.parse(lines: readLines("\(subDir)/\(rel)")),
-                                                 openPermission: false))
+            out.append(SubagentDigest.fromTranscript(lines: readLines("\(subDir)/\(rel)")))
         }
         return out
     }
@@ -330,14 +379,6 @@ final class AppController: NSObject {
         if case .finished(let v) = s { return v } else { return nil }
     }
 
-    private func subDescribe(_ s: AgentStatus) -> String {
-        switch s {
-        case .working: return "sub-agent · working"
-        case .waitingForInput: return "sub-agent · waiting"
-        case .finished(.failed): return "sub-agent · failed"
-        case .finished: return "sub-agent · done"
-        }
-    }
 }
 
 let app = NSApplication.shared

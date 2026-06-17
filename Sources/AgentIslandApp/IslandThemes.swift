@@ -4,9 +4,22 @@ import AgentIslandCore
 /// What a row's status indicator renders as. A theme returns one of these per frame; the row view
 /// shows a monospace label, a (tintable) icon, or the scrolling road scene accordingly.
 enum Cue {
-    case text(String, NSColor)         // monospace label (Minimal theme + fallbacks)
-    case icon(NSImage, tint: NSColor?) // an SF Symbol (tinted) or a hand-drawn image (tint == nil)
-    case road(tokens: Int)             // the road-trip theme's scrolling journey scene
+    case text(String, NSColor)              // monospace label (Minimal theme + fallbacks)
+    case icon(NSImage, tint: NSColor?)      // an SF Symbol (tinted) or a hand-drawn image (tint == nil)
+    case road(tokens: Int, mode: RoadMode)  // the road-trip theme's journey scene (driving or stopped)
+}
+
+/// How the road scene plays: the vehicle is either driving (world scrolls) or halted at an
+/// in-scene signal while the session waits on the developer.
+enum RoadMode: Equatable {
+    case driving
+    case stopped(StopKind)
+
+    /// Why the vehicle is stopped — shapes the signal cue (red-dominant block vs. a gentler pause).
+    enum StopKind: Equatable {
+        case permission   // blocked on a permission/elicitation prompt — a red light, your move
+        case turnEnd      // the agent ended its turn — a pitstop, idling until you reply
+    }
 }
 
 /// A visual theme for the island's per-row status cue. A theme decides what the row's indicator
@@ -55,8 +68,11 @@ struct JourneyTheme: IslandTheme {
 
     func cue(for row: IslandPanel.Row, frame: Int) -> Cue {
         if row.id == "idle" { return .icon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor) }
-        if row.spinning { return .road(tokens: row.tokens) }
-        if row.waitReason != nil { return .icon(IslandIcons.trafficLight(frame: frame), tint: nil) }
+        if row.spinning { return .road(tokens: row.tokens, mode: .driving) }
+        if let wait = row.waitReason {
+            let kind: RoadMode.StopKind = (wait == .permission) ? .permission : .turnEnd
+            return .road(tokens: row.tokens, mode: .stopped(kind))
+        }
         if row.verdict == .failed { return .icon(IslandIcons.symbol("exclamationmark.triangle.fill"), tint: .systemRed) }
         if row.dimmed { return .icon(IslandIcons.symbol("flag.checkered"), tint: .systemGreen) }
         return .icon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor)

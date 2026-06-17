@@ -284,6 +284,55 @@ check(DisplayPriority.rank(.waitingForInput(.stoppedTurn)) < DisplayPriority.ran
 check(DisplayPriority.rank(.finished(.failed)) < DisplayPriority.rank(.working), "failed outranks running")
 check(DisplayPriority.rank(.working) < DisplayPriority.rank(.finished(.success)), "running outranks finished-success")
 
+// --- Conversation title (latest non-empty ai-title wins) ---
+let titleLines = [
+    #"{"type":"ai-title","aiTitle":"First guess"}"#,
+    #"{"type":"assistant","message":{"content":[{"type":"text"}]}}"#,
+    #"{"type":"ai-title","aiTitle":"Refined title"}"#,
+    #"{"type":"ai-title","aiTitle":"   "}"#,
+]
+check(ConversationTitle.fromTranscript(lines: titleLines) == "Refined title", "title: latest non-empty ai-title wins")
+check(ConversationTitle.fromTranscript(lines: [#"{"type":"user"}"#]) == nil, "title: nil when no ai-title record")
+
+// --- Transcript clock: session start + durations from ISO-8601 timestamps ---
+let tsLines = [
+    #"{"type":"system"}"#,
+    #"{"type":"user","timestamp":"2026-06-17T16:11:38.253Z"}"#,
+    #"{"type":"assistant","timestamp":"2026-06-17T16:14:38.253Z"}"#,
+]
+check(TranscriptClock.startedAt(lines: tsLines) != nil, "clock: startedAt = first timestamped record")
+let span = TranscriptClock.span(lines: tsLines)
+check(span.first != nil && span.last.map { Int($0.timeIntervalSince(span.first!)) } == 180, "clock: span first..last = 180s")
+check(TranscriptClock.startedAt(lines: [#"{"type":"system"}"#]) == nil, "clock: nil when no timestamps")
+check(TranscriptClock.durationLabel(43) == "43s", "clock: <60s -> seconds")
+check(TranscriptClock.durationLabel(720) == "12m", "clock: minutes")
+check(TranscriptClock.durationLabel(7200) == "2h", "clock: hours")
+check(TranscriptClock.durationLabel(60 * 60 * 24 * 3) == "3d", "clock: days")
+let clockBase = TranscriptClock.parse("2026-06-17T16:11:38.253Z")!
+check(TranscriptClock.elapsedLabel(from: clockBase, to: clockBase.addingTimeInterval(600)) == "10m", "clock: elapsedLabel from->to")
+check(TranscriptClock.parse("2026-06-17T16:11:38Z") != nil, "clock: parses timestamp without fractional seconds")
+
+// --- First user text (descriptive sub-agent name source) ---
+check(TranscriptAdapter.firstUserText(lines: [
+    #"{"type":"system"}"#,
+    #"{"type":"user","message":{"content":"Survey the package"}}"#,
+]) == "Survey the package", "firstUserText: plain string content")
+check(TranscriptAdapter.firstUserText(lines: [
+    #"{"type":"user","message":{"content":[{"type":"text","text":"Trace the daemon"}]}}"#,
+]) == "Trace the daemon", "firstUserText: first text block")
+check(TranscriptAdapter.firstUserText(lines: [#"{"type":"assistant"}"#]) == nil, "firstUserText: nil when no user record")
+
+// --- Sub-agent digest: name + tokens + status + duration from one agent-*.jsonl ---
+let subLines = [
+    #"{"type":"user","timestamp":"2026-06-17T15:32:04Z","message":{"content":"Survey the Swift package at /path and list modules"}}"#,
+    #"{"type":"assistant","timestamp":"2026-06-17T15:32:52Z","message":{"content":[{"type":"text"}],"usage":{"input_tokens":2000,"output_tokens":769}}}"#,
+]
+let dig = SubagentDigest.fromTranscript(lines: subLines)
+check(dig.name.count == 38 && dig.name.hasPrefix("Survey the Swift package") && dig.name.hasSuffix("…"), "subagent digest: name = sanitized first prompt, truncated")
+check(dig.tokens == 2769, "subagent digest: tokens summed (input+output)")
+check(dig.status == .waitingForInput(.stoppedTurn), "subagent digest: status derived from records")
+check(dig.durationSeconds.map { Int($0) } == 48, "subagent digest: duration = last-first = 48s")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")
