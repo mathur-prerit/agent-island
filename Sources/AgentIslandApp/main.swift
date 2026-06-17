@@ -342,6 +342,14 @@ final class AppController: NSObject {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)  // menu-bar only, no Dock icon
+
+// Dev-only: `-renderRoadSample <path>` renders the road-trip scene grid to a PNG and exits.
+if let i = CommandLine.arguments.firstIndex(of: "-renderRoadSample"),
+   i + 1 < CommandLine.arguments.count {
+    RoadSampleRenderer.render(to: CommandLine.arguments[i + 1])
+    exit(0)
+}
+
 let controller = AppController()
 controller.start()
 app.run()

@@ -234,6 +234,27 @@ check(JourneyMilestones.vehicle(forTokens: 75_000) == "🚗", "journey: 50-100k 
 check(JourneyMilestones.vehicle(forTokens: 150_000) == "🚆", "journey: 100-200k -> train")
 check(JourneyMilestones.vehicle(forTokens: 250_000) == "✈️", "journey: >=200k -> plane (danger)")
 
+// road-trip scrolling scene: pure layout math (vehicle stage, scrolling signs, towns, takeoff)
+check(RoadJourney.stage(forTokens: 10_000) == .cycle, "road: <50k -> cycle stage")
+check(RoadJourney.stage(forTokens: 75_000) == .car, "road: 50-100k -> car stage")
+check(RoadJourney.stage(forTokens: 150_000) == .train, "road: 100-200k -> train stage")
+check(RoadJourney.stage(forTokens: 250_000) == .plane, "road: >=200k -> plane stage")
+let fresh = RoadJourney.layout(tokens: 0, viewWidth: 150)
+check(fresh.vehicleX == 150 * 0.26, "road: vehicle pinned at anchorRatio of the width")
+check(!fresh.airborne, "road: not airborne below 200k")
+check(fresh.signs.allSatisfy { $0.tokens % RoadJourney.signEvery == 0 }, "road: every sign is a 5k multiple")
+check(fresh.signs.allSatisfy { $0.label == "\($0.tokens / 1000)k" }, "road: sign labels are <n>k")
+let first = fresh.signs.min { $0.tokens < $1.tokens }
+check(first?.tokens == 5_000 && (first?.x ?? 0) > fresh.vehicleX, "road: at 0 tokens the first 5k sign is ahead of the vehicle")
+check(fresh.signs.allSatisfy { !$0.isMajor }, "road: early 5k signs are minor posts, not towns")
+let pastTown = RoadJourney.layout(tokens: 52_000, viewWidth: 150)
+check(pastTown.stage == .car, "road: just past 50k drives the car")
+check(pastTown.signs.contains { $0.tokens == 50_000 && $0.isMajor && $0.x < pastTown.vehicleX },
+      "road: the passed 50k upgrade town is a signboard lingering behind the vehicle")
+let flying = RoadJourney.layout(tokens: 220_000, viewWidth: 150)
+check(flying.airborne && flying.stage == .plane, "road: past 200k the plane has taken off")
+check(RoadJourney.layout(tokens: -5, viewWidth: 150).signs.first?.tokens == 5_000, "road: negative tokens clamp to the start")
+
 // --- Token usage ---
 let usageLines = [
     #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9999}}}"#,

@@ -253,7 +253,11 @@ final class IslandPanel: NSPanel {
 /// expand state survives. Carries a per-state background tint + a monospace status indicator.
 final class SessionRowView: NSView {
     private let line = NSStackView()
-    private let indicator = NSTextField(labelWithString: "")   // CLI cue: spinner / caret / ✓ / ✗ / ·
+    // The status cue renders as exactly one of these (the others hidden): a monospace label
+    // (Minimal CLI cues), a tintable icon (SF Symbol / traffic light), or the scrolling road scene.
+    private let cueText = NSTextField(labelWithString: "")
+    private let cueImage = NSImageView()
+    private let cueRoad = RoadSceneView()
     private let glyph = NSTextField(labelWithString: "")        // persona emoji
     private let titleLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
@@ -278,9 +282,14 @@ final class SessionRowView: NSView {
         line.spacing = 8
         line.translatesAutoresizingMaskIntoConstraints = false
 
-        indicator.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
-        indicator.translatesAutoresizingMaskIntoConstraints = false
-        indicator.setContentHuggingPriority(.required, for: .horizontal)   // size to content (1 char .. wide road bar)
+        cueText.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
+        cueText.translatesAutoresizingMaskIntoConstraints = false
+        cueText.setContentHuggingPriority(.required, for: .horizontal)   // size to content
+        cueImage.translatesAutoresizingMaskIntoConstraints = false
+        cueImage.imageScaling = .scaleProportionallyUpOrDown
+        cueImage.setContentHuggingPriority(.required, for: .horizontal)
+        cueImage.isHidden = true
+        cueRoad.isHidden = true
 
         glyph.font = .systemFont(ofSize: 16)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -299,7 +308,9 @@ final class SessionRowView: NSView {
         disclosure.contentTintColor = .tertiaryLabelColor
 
         line.addArrangedSubview(disclosure)
-        line.addArrangedSubview(indicator)
+        line.addArrangedSubview(cueText)
+        line.addArrangedSubview(cueImage)
+        line.addArrangedSubview(cueRoad)
         line.addArrangedSubview(glyph)
         line.addArrangedSubview(cell)
 
@@ -369,8 +380,24 @@ final class SessionRowView: NSView {
     private func renderIndicator(frame: Int) {
         guard let row = currentRow else { return }
         let f = IslandAnimations.reduceMotion ? 0 : frame   // Reduce Motion → freeze on frame 0
-        let cue = theme.indicator(for: row, frame: f)
-        indicator.stringValue = cue.text
-        indicator.textColor = cue.color
+        switch theme.cue(for: row, frame: f) {
+        case let .text(s, color):
+            cueText.stringValue = s
+            cueText.textColor = color
+            show(cueText)
+        case let .icon(image, tint):
+            cueImage.image = image
+            cueImage.contentTintColor = tint   // nil → the image draws with its own colours
+            show(cueImage)
+        case let .road(tokens):
+            cueRoad.tokens = tokens
+            cueRoad.frame_ = f
+            show(cueRoad)
+        }
+    }
+
+    /// Show exactly one of the three cue subviews; hide the rest (NSStackView drops hidden views).
+    private func show(_ view: NSView) {
+        for v in [cueText, cueImage, cueRoad] as [NSView] { v.isHidden = (v !== view) }
     }
 }

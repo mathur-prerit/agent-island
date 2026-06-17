@@ -1,17 +1,25 @@
 import AppKit
 import AgentIslandCore
 
+/// What a row's status indicator renders as. A theme returns one of these per frame; the row view
+/// shows a monospace label, a (tintable) icon, or the scrolling road scene accordingly.
+enum Cue {
+    case text(String, NSColor)         // monospace label (Minimal theme + fallbacks)
+    case icon(NSImage, tint: NSColor?) // an SF Symbol (tinted) or a hand-drawn image (tint == nil)
+    case road(tokens: Int)             // the road-trip theme's scrolling journey scene
+}
+
 /// A visual theme for the island's per-row status cue. A theme decides what the row's indicator
-/// shows (and its color) for a given state at a given animation frame, the row's background tint,
-/// and whether the persona emoji is shown alongside. Themes are swapped at runtime from the menu.
+/// shows for a given state at a given animation frame, the row's background tint, and whether the
+/// persona emoji is shown alongside. Themes are swapped at runtime from the menu.
 protocol IslandTheme {
     var id: String { get }
     var displayName: String { get }
     var showsPersonaGlyph: Bool { get }
     /// Does this row's cue animate (so the shared ticker needs to run)?
     func animates(_ row: IslandPanel.Row) -> Bool
-    /// The indicator string + its color for a row at tick `frame`.
-    func indicator(for row: IslandPanel.Row, frame: Int) -> (text: String, color: NSColor)
+    /// The indicator for a row at tick `frame`.
+    func cue(for row: IslandPanel.Row, frame: Int) -> Cue
     /// Row background tint base color (`.clear` = no tint).
     func tint(for row: IslandPanel.Row) -> NSColor
 }
@@ -34,54 +42,27 @@ private func stateTint(_ row: IslandPanel.Row) -> NSColor {
 
 // MARK: - Road-trip theme
 
-/// Token burn drives a journey: a vehicle that upgrades by tokens used (🚲→🚗→🚆→✈️) travels a
-/// road marked with token milestones (50K / 100K / 200K); past 200K the plane "flies dangerously"
-/// (⚠). Waiting is a traffic light; failed crashes; finished waves the chequered flag; idle parks.
+/// Token burn drives a journey: a vehicle that upgrades by tokens used (bike→car→train→plane)
+/// "drives" along a scrolling road past roadside signs every 5K tokens, with signboard "towns" at
+/// the upgrade milestones (50K / 100K / 200K); past 200K the plane takes off. Waiting shows a
+/// traffic light; failed a warning; finished the chequered flag; idle a parking sign.
 struct JourneyTheme: IslandTheme {
     let id = "journey"
     let displayName = "Road trip"
-    let showsPersonaGlyph = false   // the vehicle is the indicator
+    let showsPersonaGlyph = false   // the road scene is the indicator
 
     func animates(_ row: IslandPanel.Row) -> Bool { row.spinning || row.waitReason != nil }
 
-    func indicator(for row: IslandPanel.Row, frame: Int) -> (text: String, color: NSColor) {
-        if row.id == "idle" { return ("🅿️", .secondaryLabelColor) }
-        if row.spinning { return road(tokens: row.tokens, frame: frame) }
-        if row.waitReason != nil { return (trafficLight(frame), .systemOrange) }
-        if row.verdict == .failed { return ("💥", .systemRed) }
-        if row.dimmed { return ("🏁", .systemGreen) }
-        return ("🅿️", .secondaryLabelColor)
+    func cue(for row: IslandPanel.Row, frame: Int) -> Cue {
+        if row.id == "idle" { return .icon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor) }
+        if row.spinning { return .road(tokens: row.tokens) }
+        if row.waitReason != nil { return .icon(IslandIcons.trafficLight(frame: frame), tint: nil) }
+        if row.verdict == .failed { return .icon(IslandIcons.symbol("exclamationmark.triangle.fill"), tint: .systemRed) }
+        if row.dimmed { return .icon(IslandIcons.symbol("flag.checkered"), tint: .systemGreen) }
+        return .icon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor)
     }
 
     func tint(for row: IslandPanel.Row) -> NSColor { stateTint(row) }
-
-    private func road(tokens: Int, frame: Int) -> (String, NSColor) {
-        let vehicle = JourneyMilestones.vehicle(forTokens: tokens)
-        let color: NSColor
-        switch tokens {
-        case ..<JourneyMilestones.cycle: color = .systemTeal
-        case ..<JourneyMilestones.car:   color = .systemBlue
-        case ..<JourneyMilestones.plane: color = .systemIndigo
-        default:                         color = .systemPink
-        }
-        let cells = 9                                   // 3 bands × 3 cells; ┊ at the 50K/100K marks
-        let progress = min(Double(tokens) / Double(JourneyMilestones.plane), 1.0)
-        let filled = Int((progress * Double(cells)).rounded())
-        var bar = ""
-        for i in 0..<cells {
-            if i == 3 || i == 6 { bar += "┊" }
-            if i < filled { bar += "▰" }
-            else if i == filled && (frame / 3) % 2 == 0 { bar += "▰" }   // blinking frontier = motion
-            else { bar += "▱" }
-        }
-        let danger = tokens >= JourneyMilestones.plane ? " ⚠" : ""
-        return ("\(vehicle) ▕\(bar)▏\(danger)", color)
-    }
-
-    private func trafficLight(_ frame: Int) -> String {
-        let lights = ["🔴", "🔴", "🔴", "🟡", "🟢", "🟢", "🟡"]
-        return lights[(frame / 6) % lights.count]
-    }
 }
 
 // MARK: - Minimal CLI theme
@@ -95,13 +76,13 @@ struct MinimalTheme: IslandTheme {
 
     func animates(_ row: IslandPanel.Row) -> Bool { row.spinning || row.waitReason != nil }
 
-    func indicator(for row: IslandPanel.Row, frame: Int) -> (text: String, color: NSColor) {
-        if row.id == "idle" { return ("·", .tertiaryLabelColor) }
-        if row.spinning { return (IslandAnimations.braille[frame % IslandAnimations.braille.count], .systemTeal) }
-        if row.waitReason != nil { return ((frame / 5) % 2 == 0 ? "▋" : " ", .systemOrange) }
-        if row.verdict == .failed { return ("✗", .systemRed) }
-        if row.dimmed { return ("✓", .systemGreen) }
-        return ("·", .tertiaryLabelColor)
+    func cue(for row: IslandPanel.Row, frame: Int) -> Cue {
+        if row.id == "idle" { return .text("·", .tertiaryLabelColor) }
+        if row.spinning { return .text(IslandAnimations.braille[frame % IslandAnimations.braille.count], .systemTeal) }
+        if row.waitReason != nil { return .text((frame / 5) % 2 == 0 ? "▋" : " ", .systemOrange) }
+        if row.verdict == .failed { return .text("✗", .systemRed) }
+        if row.dimmed { return .text("✓", .systemGreen) }
+        return .text("·", .tertiaryLabelColor)
     }
 
     func tint(for row: IslandPanel.Row) -> NSColor { stateTint(row) }
