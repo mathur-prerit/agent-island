@@ -2,6 +2,14 @@ import AppKit
 import QuartzCore
 import AgentIslandCore
 
+/// A button that fires on the FIRST click even when its window isn't key. Required for controls
+/// in a non-activating status-bar panel: by default `NSButton.acceptsFirstMouse` is false, so a
+/// click while the app/panel is inactive is swallowed just to (try to) activate, and the action
+/// never fires — which reads as "clicking does nothing."
+final class FirstMouseButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// The always-on-top "island": a borderless, non-activating floating panel anchored at the
 /// screen edge that never steals keyboard focus and stays visible over fullscreen apps.
 ///
@@ -12,7 +20,7 @@ import AgentIslandCore
 final class IslandPanel: NSPanel {
     private let container = NSVisualEffectView()
     private let outerStack = NSStackView()          // vertical: [headerButton, scrollView]
-    private let headerButton = NSButton()
+    private let headerButton = FirstMouseButton()
     private let scrollView = NSScrollView()
     private let rowsStack = NSStackView()            // the scroll view's document view
     private var rowViews: [String: SessionRowView] = [:]
@@ -55,7 +63,9 @@ final class IslandPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = true
-        isMovableByWindowBackground = true
+        // NOTE: deliberately NOT movable-by-window-background — it would intercept clicks on the
+        // header button (a click with no drag becomes a no-op), and it's pointless anyway because
+        // resizeAndReposition() snaps the island back to the top-right on every refresh.
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
@@ -224,7 +234,7 @@ final class SessionRowView: NSView {
     private let stateLabel = NSTextField(labelWithString: "")
     private let cell = NSStackView()
     private let subStack = NSStackView()
-    private let disclosure = NSButton(title: "▸", target: nil, action: nil)
+    private let disclosure = FirstMouseButton(title: "▸", target: nil, action: nil)
     private var expanded = false
     private var statusKey: String?       // "working" | "static"
 
