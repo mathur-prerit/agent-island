@@ -239,8 +239,9 @@ check(ProjectLabel.fromTranscript(lines: [#"{"type":"user"}"#]) == nil, "label n
 
 // --- Display priority: states that need you float to the top ---
 check(DisplayPriority.rank(.waitingForInput(.permission)) < DisplayPriority.rank(.waitingForInput(.stoppedTurn)), "permission outranks stopped-turn waiting")
-check(DisplayPriority.rank(.waitingForInput(.stoppedTurn)) < DisplayPriority.rank(.working), "any waiting outranks working")
-check(DisplayPriority.rank(.working) < DisplayPriority.rank(.finished(.success)), "working outranks finished")
+check(DisplayPriority.rank(.waitingForInput(.stoppedTurn)) < DisplayPriority.rank(.finished(.failed)), "waiting-for-you outranks failed")
+check(DisplayPriority.rank(.finished(.failed)) < DisplayPriority.rank(.working), "failed outranks running")
+check(DisplayPriority.rank(.working) < DisplayPriority.rank(.finished(.success)), "running outranks finished-success")
 
 print("")
 if failures == 0 {
