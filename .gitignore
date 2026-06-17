@@ -6,3 +6,7 @@ DerivedData/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 xcuserdata/
 .DS_Store
+
+# Per-task backlog handoffs (session scratch; pick from these next session) + stale handoff note
+backlog/
+HANDOFF.md

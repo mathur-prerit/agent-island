@@ -255,6 +255,30 @@ let flying = RoadJourney.layout(tokens: 220_000, viewWidth: 150)
 check(flying.airborne && flying.stage == .plane, "road: past 200k the plane has taken off")
 check(RoadJourney.layout(tokens: -5, viewWidth: 150).signs.first?.tokens == 5_000, "road: negative tokens clamp to the start")
 
+// --- Sound transitions (edge-triggered) + throttle (drives the Road Runner lifecycle cues) ---
+check(TransitionDetector.transition(from: nil, to: .working) == nil,
+      "transition: first sighting is a silent baseline")
+check(TransitionDetector.transition(from: .waitingForInput(.stoppedTurn), to: .working) == .startedWorking,
+      "transition: waiting -> working fires startedWorking (game start)")
+check(TransitionDetector.transition(from: .working, to: .working) == nil,
+      "transition: working -> working is silent")
+check(TransitionDetector.transition(from: .working, to: .waitingForInput(.stoppedTurn)) == .enteredWaiting(.stoppedTurn),
+      "transition: working -> waiting(stopped) fires enteredWaiting (checkpoint / your turn)")
+check(TransitionDetector.transition(from: .working, to: .waitingForInput(.permission)) == .enteredWaiting(.permission),
+      "transition: working -> waiting(permission) fires enteredWaiting")
+check(TransitionDetector.transition(from: .waitingForInput(.stoppedTurn), to: .waitingForInput(.permission)) == nil,
+      "transition: already waiting does not re-fire")
+check(TransitionDetector.transition(from: .working, to: .finished(.success)) == .enteredFinished(.success),
+      "transition: -> finished(success) fires goal")
+check(TransitionDetector.transition(from: .working, to: .finished(.failed)) == .enteredFinished(.failed),
+      "transition: -> finished(failed) fires game over")
+check(TransitionDetector.transition(from: .finished(.success), to: .finished(.success)) == nil,
+      "transition: already finished does not re-fire")
+let throttleBase = Date(timeIntervalSince1970: 1_700_000_000)
+check(PlayThrottle.allows(now: throttleBase, last: .distantPast, cooldown: 1.0), "throttle: first play allowed")
+check(!PlayThrottle.allows(now: throttleBase.addingTimeInterval(0.5), last: throttleBase, cooldown: 1.0), "throttle: within cooldown blocked")
+check(PlayThrottle.allows(now: throttleBase.addingTimeInterval(1.0), last: throttleBase, cooldown: 1.0), "throttle: at cooldown boundary allowed")
+
 // --- Token usage ---
 let usageLines = [
     #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9999}}}"#,

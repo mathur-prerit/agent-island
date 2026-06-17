@@ -18,6 +18,7 @@ final class AppController: NSObject {
     private var timer: Timer?
     private var islandEnabled = true
     private var dismissedFinished: Set<String> = []   // finished sessions the user removed from view
+    private var lastStatus: [String: AgentStatus] = [:]   // prev status per session, for sound-cue transitions
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -59,6 +60,8 @@ final class AppController: NSObject {
         dismissedFinished.formIntersection(finishedIDs)
         sessions = sessions.filter { !dismissedFinished.contains($0.fullID) }
 
+        detectTransitions(in: sessions)
+
         menu.removeAllItems()
         if sessions.isEmpty {
             menu.addItem(infoItem("No active sessions (last 30 min)"))
@@ -87,6 +90,12 @@ final class AppController: NSObject {
         }
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
+
+        // Quiet by default: themes opt into lifecycle sound cues (today only Road Runner's arcade set).
+        let soundToggle = NSMenuItem(title: "Sound cues", action: #selector(toggleSound), keyEquivalent: "")
+        soundToggle.target = self; soundToggle.isEnabled = true
+        soundToggle.state = SoundManager.shared.isEnabled ? .on : .off
+        menu.addItem(soundToggle)
 
         menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
@@ -201,6 +210,34 @@ final class AppController: NSObject {
         UserDefaults.standard.set(id, forKey: "islandTheme")
         island.setTheme(id)
         refresh()
+    }
+
+    @objc private func toggleSound() {
+        let next = !SoundManager.shared.isEnabled
+        SoundManager.shared.isEnabled = next
+        UserDefaults.standard.set(next, forKey: SoundManager.enabledKey)
+        refresh()
+    }
+
+    // MARK: - Sound cues (theme-owned lifecycle jingles)
+
+    /// The theme the user has selected — the source of any transition sounds.
+    private var currentTheme: IslandTheme { Themes.named(UserDefaults.standard.string(forKey: "islandTheme")) }
+
+    /// Diff each visible session's status+tokens against the previous refresh and play the current
+    /// theme's clip for any sound-worthy transition. Prunes ids no longer present so a resumed
+    /// session re-arms (and its first re-sighting is a silent baseline). Dismissed sessions are
+    /// already filtered out before this runs, so they stay quiet.
+    private func detectTransitions(in sessions: [Session]) {
+        let present = Set(sessions.map(\.fullID))
+        let theme = currentTheme
+        for s in sessions {
+            if let transition = TransitionDetector.transition(from: lastStatus[s.fullID], to: s.status) {
+                SoundManager.shared.play(theme.sound(for: transition))
+            }
+            lastStatus[s.fullID] = s.status
+        }
+        lastStatus = lastStatus.filter { present.contains($0.key) }
     }
 
     // MARK: - Event-driven mode (daemon + hooks) — reversible, first-launch consent

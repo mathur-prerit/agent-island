@@ -31,7 +31,14 @@ let package = Package(
             name: "AgentIslandSelfTest",
             dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
-        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon", "HookInstall"]),
+        .executableTarget(
+            name: "AgentIslandApp",
+            dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon", "HookInstall"],
+            // Per-theme bundled resources (first use of Bundle.module). `.copy` keeps the folder
+            // structure verbatim so relative lookups resolve. The theme-spec doc is source-tree
+            // docs, not a runtime resource — exclude it so SwiftPM doesn't warn/bundle it.
+            exclude: ["Themes/README.md"],
+            resources: [.copy("Themes/RoadRunner")]),
         .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "agentislandd", dependencies: ["AgentIslandDaemon", "AgentIslandCore"]),
     ]
