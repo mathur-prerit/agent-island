@@ -226,6 +226,45 @@ final class SessionRowView: NSView {
         applyAnimations(for: row)
     }
 
-    // Replaced with the full body in Task 9; intentionally a no-op for now.
-    private func applyAnimations(for row: IslandPanel.Row) {}
+    private func applyAnimations(for row: IslandPanel.Row) {
+        let key: String
+        if row.id == "idle" { key = "idle" }
+        else if row.spinning { key = "working" }
+        else if row.waitReason == .permission { key = "wait-permission" }
+        else if row.pulsing { key = "wait-stopped" }
+        else if row.dimmed { key = "finished" }
+        else { key = "neutral" }
+
+        let became = (statusKey != key)
+        let transitionedToFinished = became && key == "finished" && statusKey != nil
+
+        if became {
+            // Tear down the previous state's looping cues before installing the new ones.
+            IslandAnimations.removeWorkingRing(from: cue)
+            IslandAnimations.removeIdleDot(from: cue)
+            IslandAnimations.stopPulse(on: glyph)
+
+            switch key {
+            case "working":
+                glyph.isHidden = false
+                IslandAnimations.installWorkingRing(on: cue)
+            case "idle":
+                glyph.isHidden = true
+                IslandAnimations.installIdleDot(on: cue)
+            case "wait-permission":
+                glyph.isHidden = false
+                IslandAnimations.startPulse(on: glyph, urgent: true)
+            case "wait-stopped":
+                glyph.isHidden = false
+                IslandAnimations.startPulse(on: glyph, urgent: false)
+            default:  // "finished", "neutral"
+                glyph.isHidden = false
+            }
+            statusKey = key
+        }
+
+        if transitionedToFinished {
+            IslandAnimations.celebrate(glyph, success: row.verdict != .failed)
+        }
+    }
 }
