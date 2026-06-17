@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import QuartzCore
 import AgentIslandCore
 import PersonaKit
 import AgentIslandDaemon
@@ -66,7 +67,27 @@ final class AppController: NSObject {
 
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
-        statusItem.button?.title = waiting > 0 ? "● \(waiting)" : (working ? "◐" : "○")
+        let glyph: String
+        let glyphColor: NSColor
+        if waiting > 0 { glyph = "● \(waiting)"; glyphColor = .systemRed }
+        else if working { glyph = "◐"; glyphColor = .systemTeal }
+        else { glyph = "○"; glyphColor = .secondaryLabelColor }
+        if let button = statusItem.button {
+            button.attributedTitle = NSAttributedString(
+                string: glyph,
+                attributes: [.foregroundColor: glyphColor, .font: NSFont.systemFont(ofSize: 13)])
+            button.wantsLayer = true
+            if waiting > 0 && !IslandAnimations.reduceMotion {
+                if button.layer?.animation(forKey: "menu-pulse") == nil {
+                    let p = CABasicAnimation(keyPath: "opacity")
+                    p.fromValue = 1.0; p.toValue = 0.45
+                    p.duration = 0.8; p.autoreverses = true; p.repeatCount = .infinity
+                    button.layer?.add(p, forKey: "menu-pulse")
+                }
+            } else {
+                button.layer?.removeAnimation(forKey: "menu-pulse")
+            }
+        }
 
         if islandEnabled {
             let rows: [IslandPanel.Row]
