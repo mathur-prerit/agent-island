@@ -44,7 +44,9 @@ public enum SettingsMerge {
         return .success(data)
     }
 
-    /// Remove only our command's entries (by exact command match), preserving everything
+    /// Remove our command's entries — matched by exact command, or by the agent-island relay
+    /// signature (so a hook installed by the app's quoted absolute path is still removed when
+    /// uninstalling via the CLI's unquoted argv[0], and vice versa) — preserving everything
     /// else. Returns `.invalidJSON` if `existing` won't parse.
     public static func uninstall(existing: Data, command: String) -> Result<Data, SettingsMergeError> {
         guard !existing.isEmpty,
@@ -69,6 +71,20 @@ public enum SettingsMerge {
 
     private static func references(entry: [String: Any], command: String) -> Bool {
         guard let inner = entry["hooks"] as? [[String: Any]] else { return false }
-        return inner.contains { ($0["command"] as? String) == command }
+        return inner.contains { hook in
+            guard let c = hook["command"] as? String else { return false }
+            // Exact match, or — when both are agent-island relay hooks — match by signature so
+            // the app (quoted absolute path) and the CLI (unquoted argv[0]) interoperate:
+            // install dedupes to one entry, and uninstall removes the other tool's entry too.
+            return c == command || (isAgentIslandRelay(c) && isAgentIslandRelay(command))
+        }
+    }
+
+    /// Recognise an agent-island relay hook regardless of quoting or the exact binary path.
+    /// The app installs `"<abs path>/AgentIslandHookCLI" relay` (quoted) while the CLI installs
+    /// `<argv0>/AgentIslandHookCLI relay` (unquoted); both reduce to this stable signature.
+    public static func isAgentIslandRelay(_ command: String) -> Bool {
+        let c = command.replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
+        return c.contains("AgentIslandHookCLI") && c.hasSuffix(" relay")
     }
 }

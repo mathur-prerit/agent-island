@@ -40,7 +40,9 @@ enum EventDrivenSetup {
     }
 
     /// Spawn `agentislandd` if its state file isn't fresh (a fresh file ⇒ already running).
-    /// A duplicate instance fails to bind the socket and exits, so this is safe to call often.
+    /// The daemon holds a single-instance flock, so a redundant spawn (e.g. a startup race in
+    /// this freshness check) exits immediately without disturbing the running one — safe to
+    /// call often.
     static func ensureDaemonRunning() {
         if let attrs = try? FileManager.default.attributesOfItem(atPath: statePath),
            let m = attrs[.modificationDate] as? Date,

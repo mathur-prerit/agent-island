@@ -18,8 +18,12 @@ public enum SettingsFile {
         case .failure(.invalidJSON):
             throw FileError.invalidExistingJSON  // do NOT overwrite a file we couldn't parse
         case .success(let merged):
-            if exists, let original = try? Data(contentsOf: url) {
-                try? original.write(to: URL(fileURLWithPath: settingsPath + ".bak"))
+            // Back up only the FIRST time (when no .bak exists yet), so a re-install doesn't
+            // overwrite the user's pristine config with an already-hooked version.
+            let backupPath = settingsPath + ".bak"
+            if exists, !FileManager.default.fileExists(atPath: backupPath),
+               let original = try? Data(contentsOf: url) {
+                try? original.write(to: URL(fileURLWithPath: backupPath))
             }
             do { try merged.write(to: url, options: .atomic) }  // temp-then-rename
             catch { throw FileError.writeFailed }

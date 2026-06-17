@@ -115,6 +115,17 @@ let stopEntries = ((root3?["hooks"] as? [String: Any])?["Stop"] as? [[String: An
 let hasOther = stopEntries.contains { ($0["hooks"] as? [[String: Any]])?.contains { ($0["command"] as? String) == "/other/tool" } ?? false }
 check(hasOther, "U4: existing third-party hook preserved")
 
+// U4b: app (quoted abs path) and CLI (unquoted argv0) relay hooks interoperate — no strand, no dup.
+let appCmd = "\"/Applications/AgentIsland.app/Contents/MacOS/AgentIslandHookCLI\" relay"
+let cliCmd = "/Users/me/.build/debug/AgentIslandHookCLI relay"
+check(SettingsMerge.isAgentIslandRelay(appCmd) && SettingsMerge.isAgentIslandRelay(cliCmd), "U4b: both relay forms recognised by signature")
+let appHooked = installed(Data(), appCmd, ["Stop"])!
+let bothHooked = installed(appHooked, cliCmd, ["Stop"])!   // CLI install dedupes against the app's hook
+check(ourEntryCount(bothHooked, event: "Stop", command: appCmd) == 1, "U4b: app+CLI relay forms dedupe to a single entry")
+if case .success(let cleaned) = SettingsMerge.uninstall(existing: appHooked, command: cliCmd) {
+    check(ourEntryCount(cleaned, event: "Stop", command: appCmd) == 0, "U4b: CLI-form uninstall removes the app-installed hook (no strand)")
+} else { check(false, "U4b: cross-form uninstall succeeded") }
+
 // --- Daemon IPC (U3) ---
 check(FrameCodec.isAcceptableLength(0), "frame length 0 acceptable")
 check(FrameCodec.isAcceptableLength(FrameCodec.maxMessageBytes), "frame length at 64KB cap acceptable")
@@ -171,6 +182,8 @@ check(parsedOtherKey(settingsTestPath) == 7 && parsedHookCount(settingsTestPath,
 check(FileManager.default.fileExists(atPath: settingsTestPath + ".bak"), "install writes a .bak backup")
 _ = try? SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop"])
 check(parsedHookCount(settingsTestPath, event: "Stop", command: "/x/hook relay") == 1, "re-install is idempotent (command appears once)")
+let bakAfterReinstall = (try? String(contentsOfFile: settingsTestPath + ".bak", encoding: .utf8)) ?? ""
+check(bakAfterReinstall.contains("otherKey") && !bakAfterReinstall.contains("hooks"), "re-install preserves the pristine .bak (original config, no hooks)")
 try? Data("not json".utf8).write(to: URL(fileURLWithPath: settingsTestPath))
 var installAborted = false
 do { try SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop"]) } catch { installAborted = true }

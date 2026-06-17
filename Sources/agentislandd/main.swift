@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import AgentIslandCore
 import AgentIslandDaemon
 
@@ -9,6 +10,21 @@ import AgentIslandDaemon
 
 let socketPath = ("~/.agent-island/agentisland.sock" as NSString).expandingTildeInPath
 let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
+
+// Single-instance guard. UnixSocketServer.start() unconditionally unlinks + rebinds the
+// socket, so without this a second daemon would silently bind over the first (orphaning its
+// listener and racing state.json). Hold an exclusive, non-blocking advisory lock for our whole
+// lifetime; if another agentislandd already holds it, exit quietly and let it keep serving.
+let lockPath = ("~/.agent-island/agentislandd.lock" as NSString).expandingTildeInPath
+try? FileManager.default.createDirectory(
+    atPath: (lockPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o644)
+if lockFD < 0 || flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+    exit(0)  // another instance is running (or we can't lock) — don't start a duplicate
+}
+// lockFD is intentionally held (never closed) for the process lifetime; the OS releases the
+// flock automatically when this process exits.
+
 let store = StateStore()
 let server = UnixSocketServer(socketPath: socketPath)
 

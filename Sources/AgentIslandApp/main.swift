@@ -152,9 +152,13 @@ final class AppController: NSObject {
 
     private func maybeOfferEventDrivenSetup() {
         let defaults = UserDefaults.standard
-        if let decision = defaults.string(forKey: eventModeKey) {
-            if decision == "enabled" { EventDrivenSetup.ensureDaemonRunning() }
-            return
+        // "enabled" and "declined" are final decisions. A prior "error" (or no decision yet)
+        // re-offers, so a transient install failure (e.g. a momentarily-malformed
+        // settings.json the user later repairs) doesn't permanently suppress the prompt.
+        switch defaults.string(forKey: eventModeKey) {
+        case "enabled": EventDrivenSetup.ensureDaemonRunning(); return
+        case "declined": return
+        default: break  // nil or "error" → offer
         }
         guard EventDrivenSetup.available else { return }  // e.g. `swift run` without `swift build`
         let alert = NSAlert()
