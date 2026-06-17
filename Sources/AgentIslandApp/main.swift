@@ -116,8 +116,8 @@ final class AppController: NSObject {
                     }
                     return IslandPanel.Row(id: s.fullID, glyph: skin.glyph, color: color(s.status),
                                            title: s.label, state: stateText,
-                                           pulsing: isWaiting(s.status), spinning: isWorking,
-                                           dimmed: isFinished(s.status),
+                                           spinning: isWorking,
+                                           dimmed: !isWorking,  // only the running row stays bright
                                            waitReason: reason, verdict: verdict(s.status), subRows: subRows)
                 }
             }

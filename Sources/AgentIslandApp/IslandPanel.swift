@@ -23,13 +23,13 @@ final class IslandPanel: NSPanel {
     struct Row {
         let id: String
         let glyph: String; let color: NSColor; let title: String; let state: String
-        let pulsing: Bool; let spinning: Bool; let dimmed: Bool
+        let spinning: Bool; let dimmed: Bool
         let waitReason: WaitReason?; let verdict: Verdict?; let subRows: [SubRow]
         init(id: String, glyph: String, color: NSColor, title: String, state: String,
-             pulsing: Bool = false, spinning: Bool = false, dimmed: Bool = false,
+             spinning: Bool = false, dimmed: Bool = false,
              waitReason: WaitReason? = nil, verdict: Verdict? = nil, subRows: [SubRow] = []) {
             self.id = id; self.glyph = glyph; self.color = color; self.title = title; self.state = state
-            self.pulsing = pulsing; self.spinning = spinning; self.dimmed = dimmed
+            self.spinning = spinning; self.dimmed = dimmed
             self.waitReason = waitReason; self.verdict = verdict; self.subRows = subRows
         }
     }
@@ -233,47 +233,16 @@ final class SessionRowView: NSView {
     }
 
     private func applyAnimations(for row: IslandPanel.Row) {
-        let key: String
-        if row.id == "idle" { key = "idle" }
-        else if row.spinning { key = "working" }
-        else if row.waitReason == .permission { key = "wait-permission" }
-        else if row.pulsing { key = "wait-stopped" }
-        else if row.dimmed { key = "finished" }
-        else { key = "neutral" }
-
-        let became = (statusKey != key)
-        let transitionedToFinished = became && key == "finished" && statusKey != nil
-
-        if became {
-            // Tear down the previous state's looping cues before installing the new ones.
-            // Pass `cue` to stopPulse so a leftover urgent alert ring is cleared too.
-            IslandAnimations.removeWorkingRing(from: cue)
-            IslandAnimations.removeIdleDot(from: cue)
-            IslandAnimations.stopPulse(on: glyph, cue: cue)
-            IslandAnimations.stopWorkingGlyph(on: glyph)
-
-            switch key {
-            case "working":
-                glyph.isHidden = false
-                IslandAnimations.installWorkingRing(on: cue)   // hue-flowing spin + orbiting twinkle dot
-                IslandAnimations.startWorkingGlyph(on: glyph)  // anchor-independent bob + opacity swell
-            case "idle":
-                glyph.isHidden = true
-                IslandAnimations.installIdleDot(on: cue)
-            case "wait-permission":
-                glyph.isHidden = false
-                IslandAnimations.startPulse(on: glyph, urgent: true, cue: cue)  // glyph pulse + amber alert ring on cue
-            case "wait-stopped":
-                glyph.isHidden = false
-                IslandAnimations.startPulse(on: glyph, urgent: false, cue: cue)
-            default:  // "finished", "neutral"
-                glyph.isHidden = false
-            }
-            statusKey = key
-        }
-
-        if transitionedToFinished {
-            IslandAnimations.celebrate(glyph, success: row.verdict != .failed, cue: cue)
+        // Only a running session animates; waiting / failed / finished / idle stay dimmed and
+        // static (their importance is conveyed by sort position + dimming, not motion).
+        let key = row.spinning ? "working" : "static"
+        guard statusKey != key else { return }
+        statusKey = key
+        IslandAnimations.removeWorkingRing(from: cue)
+        IslandAnimations.stopWorkingGlyph(on: glyph)
+        if key == "working" {
+            IslandAnimations.installWorkingRing(on: cue)   // hue-flowing spin + orbiting twinkle dot
+            IslandAnimations.startWorkingGlyph(on: glyph)  // anchor-independent bob + opacity swell
         }
     }
 }
