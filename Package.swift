@@ -31,7 +31,7 @@ let package = Package(
             name: "AgentIslandSelfTest",
             dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
-        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon"]),
+        .executableTarget(name: "AgentIslandApp", dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon", "HookInstall"]),
         .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "agentislandd", dependencies: ["AgentIslandDaemon", "AgentIslandCore"]),
     ]
