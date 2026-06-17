@@ -91,8 +91,9 @@ final class IslandPanel: NSPanel {
             view.update(row)
             ordered.append(view)
         }
-        for (id, view) in rowViews where !seen.contains(id) {
-            view.removeFromSuperview()
+        // Collect stale ids first, then delete — don't mutate `rowViews` while iterating it.
+        for id in rowViews.keys.filter({ !seen.contains($0) }) {
+            rowViews[id]?.removeFromSuperview()
             rowViews.removeValue(forKey: id)
         }
         // Reorder the stack to match `ordered`, reusing existing arranged subviews.
@@ -129,7 +130,7 @@ final class SessionRowView: NSView {
     private let stateLabel = NSTextField(labelWithString: "")
     private let cell = NSStackView()
     private let subStack = NSStackView()
-    private var disclosure: NSButton?
+    private let disclosure = NSButton(title: "▸", target: nil, action: nil)
     private var expanded = false
     private var statusKey: String?       // "working" | "wait-stopped" | "wait-permission" | "finished" | "idle"
 
@@ -160,13 +161,13 @@ final class SessionRowView: NSView {
         cell.addArrangedSubview(titleLabel)
         cell.addArrangedSubview(stateLabel)
 
-        let disc = NSButton(title: "▸", target: self, action: #selector(toggle))
-        disc.isBordered = false
-        disc.font = .systemFont(ofSize: 9)
-        disc.contentTintColor = .tertiaryLabelColor
-        disclosure = disc
+        disclosure.target = self
+        disclosure.action = #selector(toggle)
+        disclosure.isBordered = false
+        disclosure.font = .systemFont(ofSize: 9)
+        disclosure.contentTintColor = .tertiaryLabelColor
 
-        line.addArrangedSubview(disc)
+        line.addArrangedSubview(disclosure)
         line.addArrangedSubview(cue)
         line.addArrangedSubview(glyph)
         line.addArrangedSubview(cell)
@@ -196,7 +197,7 @@ final class SessionRowView: NSView {
     @objc private func toggle() {
         expanded.toggle()
         subStack.isHidden = !expanded
-        disclosure?.title = expanded ? "▾" : "▸"
+        disclosure.title = expanded ? "▾" : "▸"
         onToggle?()
     }
 
@@ -209,7 +210,7 @@ final class SessionRowView: NSView {
 
         // Disclosure + sub-rows (rebuild contents each update; preserve expanded state).
         let hasSubs = !row.subRows.isEmpty
-        disclosure?.isHidden = !hasSubs
+        disclosure.isHidden = !hasSubs
         subStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if hasSubs {
             for s in row.subRows {
