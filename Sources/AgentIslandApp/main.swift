@@ -32,7 +32,14 @@ final class AppController: NSObject {
         menu.autoenablesItems = false
         statusItem.menu = menu
         refresh()
-        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in self?.refresh() }
+        // Create the timer UNSCHEDULED and register it only in .common mode.
+        // `Timer.scheduledTimer` already registers the timer in .default mode; adding
+        // that same instance to .common a second time double-registers one timer —
+        // a pattern Apple warns against, and it can leave the timer not firing at all
+        // (the initial refresh draws, then the island never updates again). .common
+        // covers default + event-tracking + modal, so the island keeps refreshing even
+        // while the menu-bar menu is open.
+        let t = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
