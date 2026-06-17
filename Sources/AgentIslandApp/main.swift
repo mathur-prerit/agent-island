@@ -71,20 +71,26 @@ final class AppController: NSObject {
         if islandEnabled {
             let rows: [IslandPanel.Row]
             if sessions.isEmpty {
-                rows = [IslandPanel.Row(glyph: "·", color: .tertiaryLabelColor,
+                rows = [IslandPanel.Row(id: "idle", glyph: "·", color: .tertiaryLabelColor,
                                         title: "idle", state: "no active sessions (last 30 min)")]
             } else {
                 rows = sessions.map { s -> IslandPanel.Row in
                     let skin = persona(for: s).skin(for: s.status)
-                    let working = (s.status == .working)
-                    let stateText = (working && s.steps > 0) ? "\(skin.label) · \(s.steps) steps" : skin.label
+                    let isWorking = (s.status == .working)
+                    let reason = waitReason(s.status)
+                    var parts: [String] = [skin.label]
+                    if isWorking && s.steps > 0 { parts.append("\(s.steps) steps") }
+                    if !isFinished(s.status) && s.tokens > 0 { parts.append("\(TokenUsage.compact(s.tokens)) tok") }
+                    var stateText = parts.joined(separator: " · ")
+                    if reason == .permission { stateText = "❗ " + stateText }
                     let subRows = s.subStatuses.map {
                         IslandPanel.SubRow(glyph: "↳", color: color($0), text: subDescribe($0))
                     }
-                    return IslandPanel.Row(glyph: skin.glyph, color: color(s.status),
+                    return IslandPanel.Row(id: s.fullID, glyph: skin.glyph, color: color(s.status),
                                            title: s.label, state: stateText,
-                                           pulsing: isWaiting(s.status), spinning: working,
-                                           dimmed: isFinished(s.status), subRows: subRows)
+                                           pulsing: isWaiting(s.status), spinning: isWorking,
+                                           dimmed: isFinished(s.status),
+                                           waitReason: reason, verdict: verdict(s.status), subRows: subRows)
                 }
             }
             island.update(rows: rows)
@@ -192,11 +198,18 @@ final class AppController: NSObject {
 
     private func color(_ s: AgentStatus) -> NSColor {
         switch s {
-        case .working: return .systemYellow
-        case .waitingForInput: return .systemRed
+        case .working: return .systemTeal
+        case .waitingForInput(.permission): return .systemOrange
+        case .waitingForInput(.stoppedTurn): return .systemRed
         case .finished(.failed): return .systemRed
         case .finished: return .systemGreen
         }
+    }
+    private func waitReason(_ s: AgentStatus) -> WaitReason? {
+        if case .waitingForInput(let r) = s { return r } else { return nil }
+    }
+    private func verdict(_ s: AgentStatus) -> Verdict? {
+        if case .finished(let v) = s { return v } else { return nil }
     }
 
     private func subDescribe(_ s: AgentStatus) -> String {

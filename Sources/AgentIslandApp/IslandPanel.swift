@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import AgentIslandCore
 
 /// The always-on-top "island": a borderless, non-activating floating panel anchored at
 /// the screen edge that never steals keyboard focus and stays visible over fullscreen
@@ -19,12 +20,16 @@ final class IslandPanel: NSPanel {
     }
 
     struct Row {
+        let id: String
         let glyph: String; let color: NSColor; let title: String; let state: String
-        let pulsing: Bool; let spinning: Bool; let dimmed: Bool; let subRows: [SubRow]
-        init(glyph: String, color: NSColor, title: String, state: String,
-             pulsing: Bool = false, spinning: Bool = false, dimmed: Bool = false, subRows: [SubRow] = []) {
-            self.glyph = glyph; self.color = color; self.title = title; self.state = state
-            self.pulsing = pulsing; self.spinning = spinning; self.dimmed = dimmed; self.subRows = subRows
+        let pulsing: Bool; let spinning: Bool; let dimmed: Bool
+        let waitReason: WaitReason?; let verdict: Verdict?; let subRows: [SubRow]
+        init(id: String, glyph: String, color: NSColor, title: String, state: String,
+             pulsing: Bool = false, spinning: Bool = false, dimmed: Bool = false,
+             waitReason: WaitReason? = nil, verdict: Verdict? = nil, subRows: [SubRow] = []) {
+            self.id = id; self.glyph = glyph; self.color = color; self.title = title; self.state = state
+            self.pulsing = pulsing; self.spinning = spinning; self.dimmed = dimmed
+            self.waitReason = waitReason; self.verdict = verdict; self.subRows = subRows
         }
     }
 
