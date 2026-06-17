@@ -1,5 +1,4 @@
 import AppKit
-import QuartzCore
 import AgentIslandCore
 
 /// A button that fires on the FIRST click even when its window isn't key. Required for controls
@@ -13,10 +12,11 @@ final class FirstMouseButton: NSButton {
 /// The always-on-top "island": a borderless, non-activating floating panel anchored at the
 /// screen edge that never steals keyboard focus and stays visible over fullscreen apps.
 ///
-/// Collapsed by default to a single clickable summary line (e.g. "agent-island · ❗1 waiting ·
-/// ◐2 running ▸"); clicking the header toggles a full, priority-ordered list inside a
-/// height-capped scroll view, so it never eats the screen. Sessions sort needs-you → failed →
-/// running → finished, and only the running rows animate — everything else is dimmed and still.
+/// Collapsed by default to a single clickable summary line; clicking the header toggles a
+/// priority-ordered list (waiting-for-you → failed → running → finished) inside a height-capped
+/// scroll view. Each row carries a per-state background tint and a CLI-style status cue: a
+/// braille spinner while running, a blinking caret while waiting, a static ✓/✗/· otherwise. A
+/// single shared ticker drives the motion (and is off when nothing animates / Reduce Motion).
 final class IslandPanel: NSPanel {
     private let container = NSVisualEffectView()
     private let outerStack = NSStackView()          // vertical: [headerButton, scrollView]
@@ -31,6 +31,9 @@ final class IslandPanel: NSPanel {
     private var scrollHeight: NSLayoutConstraint!
     private let maxRowsHeight: CGFloat = 260         // cap; rows beyond this scroll
     private static let expandedKey = "islandExpanded"
+
+    private var ticker: Timer?                       // shared CLI-cue animator
+    private var frameCount = 0
 
     struct SubRow {
         let glyph: String; let color: NSColor; let text: String
@@ -63,9 +66,8 @@ final class IslandPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = true
-        // NOTE: deliberately NOT movable-by-window-background — it would intercept clicks on the
-        // header button (a click with no drag becomes a no-op), and it's pointless anyway because
-        // resizeAndReposition() snaps the island back to the top-right on every refresh.
+        // NOT movable-by-window-background — it intercepts header clicks, and the island
+        // re-snaps to the top-right on every refresh anyway.
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
@@ -77,7 +79,6 @@ final class IslandPanel: NSPanel {
         container.layer?.cornerRadius = 16
         container.layer?.masksToBounds = true
 
-        // Clickable header that toggles collapse/expand.
         headerButton.isBordered = false
         headerButton.bezelStyle = .inline
         headerButton.setButtonType(.momentaryChange)
@@ -87,10 +88,9 @@ final class IslandPanel: NSPanel {
         headerButton.action = #selector(toggleCollapsed)
         headerButton.translatesAutoresizingMaskIntoConstraints = false
 
-        // Rows live in a vertical stack inside the scroll view (document view).
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
-        rowsStack.spacing = 8
+        rowsStack.spacing = 6
         rowsStack.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -142,8 +142,6 @@ final class IslandPanel: NSPanel {
     }
 
     private func render() {
-        // Reconcile row views by session id into rowsStack, reusing instances so the running
-        // row's Core Animation loop keeps running across refreshes and across collapse/expand.
         var ordered: [NSView] = []
         var seen = Set<String>()
         for row in lastRows {
@@ -161,8 +159,8 @@ final class IslandPanel: NSPanel {
             rowViews[id]?.removeFromSuperview()
             rowViews.removeValue(forKey: id)
         }
-        // Place each view at its target index. Only remove a CURRENTLY-arranged view — calling
-        // removeArrangedSubview on a non-arranged view aborts the app on macOS 26+.
+        // Only remove a CURRENTLY-arranged view — removeArrangedSubview on a non-arranged view
+        // aborts the app on macOS 26+.
         for (i, v) in ordered.enumerated() {
             let current = rowsStack.arrangedSubviews.firstIndex(of: v)
             if current == i { continue }
@@ -173,6 +171,26 @@ final class IslandPanel: NSPanel {
         headerButton.attributedTitle = headerTitle()
         scrollView.isHidden = !expanded
         resizeAndReposition()
+        updateTicker()
+    }
+
+    /// Run the shared CLI ticker only while the list is expanded and a row actually animates
+    /// (working spinner / waiting caret), and never under Reduce Motion.
+    private func updateTicker() {
+        let needs = expanded && !IslandAnimations.reduceMotion && rowViews.values.contains { $0.isAnimating }
+        if needs {
+            guard ticker == nil else { return }
+            let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.frameCount &+= 1
+                for v in self.rowViews.values { v.tick(self.frameCount) }
+            }
+            RunLoop.main.add(t, forMode: .common)
+            ticker = t
+        } else {
+            ticker?.invalidate()
+            ticker = nil
+        }
     }
 
     private func headerTitle() -> NSAttributedString {
@@ -206,10 +224,8 @@ final class IslandPanel: NSPanel {
 
     private func resizeAndReposition() {
         container.layoutSubtreeIfNeeded()
-        // Width: fit the widest row (or the header), clamped to a sane band.
         let widest = max(headerButton.fittingSize.width, rowViews.values.map { $0.fittingSize.width }.max() ?? 0)
         scrollWidth.constant = min(max(240, widest), 460)
-        // Height: cap the rows area so a long list scrolls instead of growing without bound.
         let rowsContentHeight = rowsStack.fittingSize.height
         scrollHeight.constant = expanded ? min(rowsContentHeight, maxRowsHeight) : 0
         container.layoutSubtreeIfNeeded()
@@ -224,36 +240,38 @@ final class IslandPanel: NSPanel {
     }
 }
 
-/// One reused-per-session row. Persists across refreshes so Core Animation loops aren't
-/// reseated each tick, and so a state transition (e.g. -> finished) can fire a one-shot once.
+/// One reused-per-session row. Persists across refreshes so the CLI cue keeps ticking and the
+/// expand state survives. Carries a per-state background tint + a monospace status indicator.
 final class SessionRowView: NSView {
     private let line = NSStackView()
-    private let cue = NSView()            // fixed-size host for ring / idle dot (14x14)
-    private let glyph = NSTextField(labelWithString: "")
+    private let indicator = NSTextField(labelWithString: "")   // CLI cue: spinner / caret / ✓ / ✗ / ·
+    private let glyph = NSTextField(labelWithString: "")        // persona emoji
     private let titleLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
     private let cell = NSStackView()
     private let subStack = NSStackView()
     private let disclosure = FirstMouseButton(title: "▸", target: nil, action: nil)
     private var expanded = false
-    private var statusKey: String?       // "working" | "static"
+    private var animKind = "static"     // "working" | "waiting" | "static"
 
     var onToggle: (() -> Void)?
+    var isAnimating: Bool { animKind == "working" || animKind == "waiting" }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 7
 
         line.orientation = .horizontal
         line.alignment = .centerY
-        line.spacing = 9
+        line.spacing = 8
         line.translatesAutoresizingMaskIntoConstraints = false
 
-        cue.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            cue.widthAnchor.constraint(equalToConstant: 14),
-            cue.heightAnchor.constraint(equalToConstant: 14),
-        ])
+        indicator.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
+        indicator.alignment = .center
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.widthAnchor.constraint(equalToConstant: 15).isActive = true
 
         glyph.font = .systemFont(ofSize: 16)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -272,7 +290,7 @@ final class SessionRowView: NSView {
         disclosure.contentTintColor = .tertiaryLabelColor
 
         line.addArrangedSubview(disclosure)
-        line.addArrangedSubview(cue)
+        line.addArrangedSubview(indicator)
         line.addArrangedSubview(glyph)
         line.addArrangedSubview(cell)
 
@@ -286,6 +304,7 @@ final class SessionRowView: NSView {
         outer.orientation = .vertical
         outer.alignment = .leading
         outer.spacing = 4
+        outer.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 10)   // padding inside the tint
         outer.translatesAutoresizingMaskIntoConstraints = false
         addSubview(outer)
         NSLayoutConstraint.activate([
@@ -312,6 +331,13 @@ final class SessionRowView: NSView {
         stateLabel.textColor = row.dimmed ? .tertiaryLabelColor : row.color
         glyph.stringValue = row.glyph
 
+        // CLI status cue + per-state background tint.
+        let cue = cue(for: row)
+        animKind = cue.kind
+        indicator.stringValue = cue.char
+        indicator.textColor = cue.color
+        layer?.backgroundColor = cue.tint.withAlphaComponent(0.13).cgColor
+
         // Disclosure + sub-rows (rebuild contents each update; preserve expanded state).
         let hasSubs = !row.subRows.isEmpty
         disclosure.isHidden = !hasSubs
@@ -327,20 +353,28 @@ final class SessionRowView: NSView {
         } else {
             subStack.isHidden = true
         }
-        applyAnimations(for: row)
     }
 
-    private func applyAnimations(for row: IslandPanel.Row) {
-        // Only a running session animates; waiting / failed / finished / idle stay dimmed and
-        // static (their importance is conveyed by sort position + dimming, not motion).
-        let key = row.spinning ? "working" : "static"
-        guard statusKey != key else { return }
-        statusKey = key
-        IslandAnimations.removeWorkingRing(from: cue)
-        IslandAnimations.stopWorkingGlyph(on: glyph)
-        if key == "working" {
-            IslandAnimations.installWorkingRing(on: cue)   // hue-flowing spin + orbiting twinkle dot
-            IslandAnimations.startWorkingGlyph(on: glyph)  // anchor-independent bob + opacity swell
+    /// The CLI cue for a row: its animation kind, the initial indicator char, that char's color,
+    /// and the row's background tint base color.
+    private func cue(for row: IslandPanel.Row) -> (kind: String, char: String, color: NSColor, tint: NSColor) {
+        if row.id == "idle" { return ("static", "·", .tertiaryLabelColor, .clear) }
+        if row.spinning { return ("working", IslandAnimations.braille[0], .systemTeal, .systemTeal) }
+        if row.waitReason != nil { return ("waiting", "▋", .systemOrange, .systemOrange) }
+        if row.verdict == .failed { return ("static", "✗", .systemRed, .systemRed) }
+        if row.dimmed { return ("static", "✓", .systemGreen, .systemGreen) }   // finished
+        return ("static", "·", .tertiaryLabelColor, .clear)
+    }
+
+    /// Advance the CLI cue one tick (called by the panel's shared ticker).
+    func tick(_ frame: Int) {
+        switch animKind {
+        case "working":
+            indicator.stringValue = IslandAnimations.braille[frame % IslandAnimations.braille.count]
+        case "waiting":
+            indicator.stringValue = (frame / 5) % 2 == 0 ? "▋" : " "   // blink ~0.5s
+        default:
+            break
         }
     }
 }
