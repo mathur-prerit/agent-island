@@ -25,6 +25,7 @@ final class AppController: NSObject {
     private struct Session {
         let fullID: String; let shortID: String; let label: String
         let status: AgentStatus; let subStatuses: [AgentStatus]; let steps: Int
+        let tokens: Int
     }
 
     func start() {
@@ -128,7 +129,8 @@ final class AppController: NSObject {
             subs += Array(repeating: .finished(.success), count: snap.subDone)
             let short = String(snap.sessionID.prefix(8))
             return Session(fullID: snap.sessionID, shortID: short, label: short,
-                           status: AgentStatus(stateToken: snap.state), subStatuses: subs, steps: 0)
+                           status: AgentStatus(stateToken: snap.state), subStatuses: subs, steps: 0,
+                           tokens: 0)
         }
     }
 
@@ -151,13 +153,20 @@ final class AppController: NSObject {
                 let subs = subAgentStatuses(forSession: p)
                 let rolled = Rollup.rollUp(session: sessionStatus, subAgents: subs)
                 let steps = records.reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
+                let tokens = TokenUsage.freshTokens(lines: lines)
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
-                let label = projectName(fromLines: lines) ?? String(fullID.prefix(8))
+                let label = ProjectLabel.fromTranscript(lines: lines) ?? String(fullID.prefix(8))
                 found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
-                                      label: label, status: rolled, subStatuses: subs, steps: steps), mtime))
+                                      label: label, status: rolled, subStatuses: subs, steps: steps,
+                                      tokens: tokens), mtime))
             }
         }
-        return found.sorted { $0.mtime > $1.mtime }.map(\.session)
+        return found
+            .sorted {
+                let ra = DisplayPriority.rank($0.session.status), rb = DisplayPriority.rank($1.session.status)
+                return ra != rb ? ra < rb : $0.mtime > $1.mtime
+            }
+            .map(\.session)
     }
 
     private func subAgentStatuses(forSession sessionPath: String) -> [AgentStatus] {
@@ -176,18 +185,6 @@ final class AppController: NSObject {
     private func readLines(_ path: String) -> [String] {
         (try? String(contentsOfFile: path, encoding: .utf8))?
             .split(separator: "\n", omittingEmptySubsequences: true).map(String.init) ?? []
-    }
-
-    /// Friendly label from the transcript's cwd (the project folder), else a short id.
-    private func projectName(fromLines lines: [String]) -> String? {
-        for line in lines.prefix(80) {
-            guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let cwd = obj["cwd"] as? String, !cwd.isEmpty else { continue }
-            let name = (cwd as NSString).lastPathComponent
-            return name.isEmpty ? nil : name
-        }
-        return nil
     }
 
     private func isWaiting(_ s: AgentStatus) -> Bool { if case .waitingForInput = s { return true } else { return false } }
