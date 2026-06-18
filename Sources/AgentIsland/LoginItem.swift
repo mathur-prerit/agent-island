@@ -38,11 +38,20 @@ enum LoginItem {
         catch { FileHandle.standardError.write(Data("  note: SMAppService.register failed: \(error)\n".utf8)); return false }
     }
 
-    /// Attempt to unregister the login item. A "not registered" state is treated as success
-    /// (idempotent — uninstall shouldn't fail because there was nothing to remove).
+    /// Attempt to unregister the login item. Only an ENABLED item can (and should) be unregistered; any
+    /// other state — .notRegistered, .notFound, .requiresApproval — means there's nothing for us to
+    /// remove, so it's a quiet success (idempotent uninstall). From the bundle-less CLI,
+    /// `SMAppService.mainApp` usually can't act on the APP's login item and throws "Operation not
+    /// permitted"; that's not a failure of the uninstall — the app's own "Launch at login" toggle (or
+    /// System Settings ▸ Login Items) is the reliable control. So we never fail the uninstall over it.
     static func unregister() -> Bool {
-        guard service.status != .notRegistered else { return true }
+        guard service.status == .enabled else { return true }
         do { try service.unregister(); return true }
-        catch { FileHandle.standardError.write(Data("  note: SMAppService.unregister failed: \(error)\n".utf8)); return false }
+        catch {
+            FileHandle.standardError.write(Data(
+                ("  note: couldn't remove the login item from the CLI — if agent-island still shows under "
+                 + "System Settings ▸ General ▸ Login Items, switch it off there.\n").utf8))
+            return true
+        }
     }
 }
