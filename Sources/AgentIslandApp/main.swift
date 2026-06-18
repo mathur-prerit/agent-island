@@ -57,7 +57,18 @@ final class AppController: NSObject {
         let status: AgentStatus; let subDigests: [SubagentDigest]; let steps: Int
         let tokens: Int
         let startedAt: Date?                      // first transcript record time → running time
+        var provider: SessionProviderKind = .claude   // which agent CLI — drives the row badge
+        // Last-activity time, when the source has one (poll-only providers: transcript mtime / DB
+        // time_updated). The daemon path doesn't track it (nil), so it only matters for ordering
+        // poll-derived rows (e.g. OpenCode rows merged alongside the daemon-fresh Claude list).
+        var lastActivity: Date? = nil
     }
+
+    // The poll-only providers merged into the island alongside the Claude daemon/poll path. Claude is
+    // the default + verified provider; OpenCode is additive (reads its SQLite db read-only). Both live
+    // behind the `SessionProvider` protocol in AgentIslandCore.
+    private let claudeProvider = ClaudeCodeProvider()
+    private let openCodeProvider = OpenCodeProvider()
 
     func start() {
         statusItem.button?.title = "○"
@@ -290,7 +301,9 @@ final class AppController: NSObject {
                     // Title = the conversation's ai-title when known (more descriptive than the
                     // project name); the project name moves into the expanded detail line.
                     let title = s.title.map { TaskLineSanitizer.sanitize($0, maxLength: 36) } ?? s.label
-                    let detail = "📂 \(s.label)"   // project name (the title line now shows the ai-title)
+                    // Project name in the expanded detail, with a small provider badge so a merged
+                    // island distinguishes OpenCode rows from Claude ones (Claude stays unbadged).
+                    let detail = "📂 \(providerBadge(s.provider))\(s.label)"
                     let subRows = s.subDigests.map { d -> IslandPanel.SubRow in
                         var bits = [d.name]
                         if d.tokens > 0 { bits.append("\(TokenUsage.compact(d.tokens)) tok") }
@@ -314,7 +327,14 @@ final class AppController: NSObject {
 
     private func rowText(for s: Session) -> String {
         let skin = persona(for: s).skin(for: s.status)
-        return "\(skin.glyph)  \(s.label)  —  \(skin.label)"
+        return "\(providerBadge(s.provider))\(skin.glyph)  \(s.label)  —  \(skin.label)"
+    }
+
+    /// A small leading "[OC] " tag so a merged island can tell an OpenCode session from a Claude one.
+    /// Claude is the default/unbadged provider (no clutter on the common case); only additive
+    /// providers carry a badge.
+    private func providerBadge(_ p: SessionProviderKind) -> String {
+        p == .claude ? "" : "[\(p.badge)] "
     }
 
     private func persona(for s: Session) -> Persona {
@@ -553,12 +573,31 @@ final class AppController: NSObject {
     // MARK: - Sessions (daemon state if running, else poll transcripts)
 
     private func activeSessions() -> [Session] {
-        if let d = daemonSessions() { return d }
+        if let d = daemonSessions() {
+            // The Claude daemon is authoritative for Claude rows, but it knows nothing about OpenCode
+            // (poll-only, independent of the daemon). Without this merge, OpenCode rows vanish whenever
+            // the daemon is up (the default after consent). Merge OpenCode's poll alongside — the
+            // daemon rows are appended-to and re-sorted, never routed through the daemon or mutated.
+            return Self.mergeOpenCode(intoDaemon: d, openCode: openCodeProvider.poll(now: Date()))
+        }
         // Daemon down/stale → polling. Window identity doesn't go stale the way *state* does (a
         // terminal window doesn't move), so load it best-effort from state.json regardless of the
         // freshness gate — click-to-focus keeps working as long as the session was ever seen.
         loadWindowIdentitiesFromState()
         return polledSessions()
+    }
+
+    /// Merge OpenCode poll rows into the daemon-fresh Claude list. The daemon rows are kept exactly as
+    /// produced (content byte-for-byte unchanged); OpenCode rows are mapped and appended, then the
+    /// COMBINED list is re-sorted with the SAME comparator the poll path uses — `DisplayPriority.rank`
+    /// ascending, then `lastActivity` descending. A trailing original-index tiebreaker keeps the sort
+    /// stable, so daemon rows preserve their relative order within a priority rank (and among each
+    /// other, since they share a nil `lastActivity`). OpenCode stays poll-only and independent of the
+    /// daemon's authority — this only affects display order of the merged list.
+    private static func mergeOpenCode(intoDaemon daemon: [Session], openCode: [ProviderSession]) -> [Session] {
+        guard !openCode.isEmpty else { return daemon }   // nothing to merge → daemon untouched
+        let combined = daemon + openCode.map(Self.session(from:))
+        return SessionMergeOrder.ordered(combined, status: \.status, lastActivity: \.lastActivity)
     }
 
     /// Populate `windowIdentities` from state.json WITHOUT the daemon-freshness gate. A terminal
@@ -628,51 +667,9 @@ final class AppController: NSObject {
         return "\(projectsDir)/\(encoded)/\(sessionID).jsonl"
     }
 
-    private func polledSessions() -> [Session] {
-        guard let projects = try? fm.contentsOfDirectory(atPath: projectsDir) else { return [] }
-        let cutoff = Date().addingTimeInterval(-activeWindow)
-        var found: [(session: Session, mtime: Date)] = []
-        for proj in projects {
-            let projPath = "\(projectsDir)/\(proj)"
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: projPath, isDirectory: &isDir), isDir.boolValue,
-                  let entries = try? fm.contentsOfDirectory(atPath: projPath) else { continue }
-            for entry in entries where entry.hasSuffix(".jsonl") {
-                let p = "\(projPath)/\(entry)"
-                let mtime = ((try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date) ?? .distantPast
-                guard mtime >= cutoff else { continue }
-                let lines = readLines(p)
-                let records = TranscriptAdapter.parse(lines: lines)
-                // mtime = last write to the transcript; lets deriveStatus tell a mid-turn text
-                // preamble (still working) from a turn that truly stopped (waiting).
-                let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false,
-                                                             lastActivity: mtime)
-                let digests = subagentDigests(forTranscript: p)
-                var rolled = Rollup.rollUp(session: sessionStatus, subAgents: digests.map(\.status))
-                // A session stopped (waiting) but quiet >10 min reads as idle, not "waiting on
-                // you" — mirrors the daemon's idle downgrade. (Polling still can't tell a truly
-                // closed session from a long wait, but at least it stops nagging.)
-                if case .waitingForInput = rolled, Date().timeIntervalSince(mtime) > 600 {
-                    rolled = .finished(.success)
-                }
-                let digest = TranscriptDigest.scan(lines: lines)   // one pass; `records` (above) stays for status
-                let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
-                let label = ProjectLabel.fromTranscript(lines: lines) ?? String(fullID.prefix(8))
-                found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
-                                      label: label, title: digest.title, status: rolled, subDigests: digests,
-                                      steps: digest.steps, tokens: digest.tokens, startedAt: digest.startedAt), mtime))
-            }
-        }
-        return found
-            .sorted {
-                let ra = DisplayPriority.rank($0.session.status), rb = DisplayPriority.rank($1.session.status)
-                return ra != rb ? ra < rb : $0.mtime > $1.mtime
-            }
-            .map(\.session)
-    }
-
     /// Per-sub-agent digests for a session, parsed from its `subagents/agent-*.jsonl` transcripts.
-    /// Used in both daemon and polling modes (the daemon only tracks counts).
+    /// Still used by the daemon path (the daemon tracks counts only; the App computes the per-sub
+    /// detail from disk). The Claude polling path now gets these from `ClaudeCodeProvider`.
     private func subagentDigests(forTranscript sessionPath: String) -> [SubagentDigest] {
         let subDir = (sessionPath as NSString).deletingPathExtension + "/subagents"
         guard let walker = fm.enumerator(atPath: subDir) else { return [] }
@@ -692,6 +689,37 @@ final class AppController: NSObject {
     private func readLines(_ path: String) -> [String] {
         (try? String(contentsOfFile: path, encoding: .utf8))?
             .split(separator: "\n", omittingEmptySubsequences: true).map(String.init) ?? []
+    }
+
+    /// Poll every enabled provider and merge into one list. Claude is polled via `ClaudeCodeProvider`
+    /// (a verbatim extraction of the old inline `~/.claude/projects` scan — same discovery, parse,
+    /// state derivation, idle downgrade, and sort, now living in AgentIslandCore behind the
+    /// `SessionProvider` protocol). OpenCode is additive: its SQLite db read read-only, top-level
+    /// non-archived sessions only. Each provider already sorts its own list by action-priority then
+    /// recency; merging preserves that order across providers so the most-urgent rows still float up.
+    private func polledSessions() -> [Session] {
+        let now = Date()
+        let merged = claudeProvider.poll(now: now) + openCodeProvider.poll(now: now)
+        return merged
+            .sorted(by: Self.providerSortsBefore)
+            .map(Self.session(from:))
+    }
+
+    /// `ProviderSession → Session`, carrying `lastActivity` so a merged list (e.g. OpenCode rows
+    /// alongside the daemon-fresh Claude rows) can be ordered by the same recency tiebreaker.
+    private static func session(from p: ProviderSession) -> Session {
+        Session(fullID: p.fullID, shortID: String(p.fullID.prefix(8)), label: p.label, title: p.title,
+                status: p.status, subDigests: p.subDigests, steps: p.steps, tokens: p.tokens,
+                startedAt: p.startedAt, provider: p.provider, lastActivity: p.lastActivity)
+    }
+
+    /// The merge comparator used everywhere: action-priority (`DisplayPriority.rank`) ascending, then
+    /// most-recent `lastActivity` first. Shared by the poll merge and the daemon+OpenCode merge so the
+    /// ordering rule never drifts between paths.
+    private static func providerSortsBefore(_ a: ProviderSession, _ b: ProviderSession) -> Bool {
+        let ra = DisplayPriority.rank(a.status), rb = DisplayPriority.rank(b.status)
+        if ra != rb { return ra < rb }
+        return (a.lastActivity ?? .distantPast) > (b.lastActivity ?? .distantPast)
     }
 
     private func isWaiting(_ s: AgentStatus) -> Bool { if case .waitingForInput = s { return true } else { return false } }

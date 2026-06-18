@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import SQLite3
 import AgentIslandCore
 import PersonaKit
 import HookInstall
@@ -1246,6 +1247,342 @@ check(cliEntry.id == "mytheme" && cliEntry.sizeBytes == cliBlob.count
       "cli-theme-add: self-verifying entry's size+sha match the downloaded bytes")
 check(cliEntry.verify(cliBlob) == nil, "cli-theme-add: the self-verifying entry passes the shared integrity verify on its own bytes")
 check(cliEntry.verify(Data("tampered".utf8)) != nil, "cli-theme-add: a different blob still fails the shared verify")
+
+// =====================================================================================
+// Multi-agent providers: SessionProvider abstraction + OpenCode (Codex deferred — seam only).
+// =====================================================================================
+
+// --- Provider badge / kind (drives the small per-row tag distinguishing OpenCode from Claude) ---
+check(SessionProviderKind.claude.badge == "C" && SessionProviderKind.opencode.badge == "OC",
+      "provider: badge glyphs (C / OC)")
+
+// --- ClaudeCodeProvider parity: the extracted pure mapping must equal composing the original seams
+//     (StateEngine + Rollup + the >10-min waiting→idle downgrade + TranscriptDigest). This is the
+//     regression guard that refactoring Claude behind the protocol changed NO behavior. ---
+let claudeNow = Date(timeIntervalSince1970: 1_700_000_000)
+func claudeOldStyle(lines: [String], subStatuses: [AgentStatus], mtime: Date, now: Date) -> AgentStatus {
+    let records = TranscriptAdapter.parse(lines: lines)
+    let s = StateEngine.deriveStatus(records: records, openPermission: false, lastActivity: mtime, now: now)
+    var rolled = Rollup.rollUp(session: s, subAgents: subStatuses)
+    if case .waitingForInput = rolled, now.timeIntervalSince(mtime) > 600 { rolled = .finished(.success) }
+    return rolled
+}
+// (a) a stopped text-tail, just touched → working (mid-turn preamble), matches old logic.
+let claudeLinesWorking = [
+    #"{"type":"user","cwd":"/Users/x/projects/repo-a","message":{"content":"hi"}}"#,
+    #"{"type":"assistant","message":{"id":"m1","content":[{"type":"text"}],"usage":{"input_tokens":10,"output_tokens":5}},"timestamp":"2023-11-14T22:00:00.000Z"}"#,
+]
+let claudeWorking = ClaudeCodeProvider.session(lines: claudeLinesWorking, fullID: "sess-a", mtime: claudeNow,
+                                               subDigests: [], now: claudeNow.addingTimeInterval(3))
+check(claudeWorking.status == claudeOldStyle(lines: claudeLinesWorking, subStatuses: [], mtime: claudeNow, now: claudeNow.addingTimeInterval(3)),
+      "ClaudeCodeProvider: recent text-tail status matches old inline logic (working)")
+check(claudeWorking.provider == .claude, "ClaudeCodeProvider: provider kind tagged .claude")
+check(claudeWorking.label == "repo-a", "ClaudeCodeProvider: label from transcript cwd lastPathComponent")
+check(claudeWorking.tokens == TranscriptDigest.scan(lines: claudeLinesWorking).tokens && claudeWorking.tokens > 0,
+      "ClaudeCodeProvider: token figure == TranscriptDigest.scan")
+// (b) a stopped text-tail gone quiet past the idle window → finished/idle downgrade, matches old logic.
+let claudeStale = ClaudeCodeProvider.session(lines: claudeLinesWorking, fullID: "sess-a", mtime: claudeNow,
+                                             subDigests: [], now: claudeNow.addingTimeInterval(900))
+check(claudeStale.status == .finished(.success)
+      && claudeStale.status == claudeOldStyle(lines: claudeLinesWorking, subStatuses: [], mtime: claudeNow, now: claudeNow.addingTimeInterval(900)),
+      "ClaudeCodeProvider: waiting→idle downgrade past 10min matches old logic")
+// (c) a waiting text-tail BEFORE the idle window stays waiting (not yet downgraded).
+let claudeWaiting = ClaudeCodeProvider.session(lines: claudeLinesWorking, fullID: "sess-a", mtime: claudeNow,
+                                               subDigests: [], now: claudeNow.addingTimeInterval(120))
+check(claudeWaiting.status == .waitingForInput(.stoppedTurn)
+      && claudeWaiting.status == claudeOldStyle(lines: claudeLinesWorking, subStatuses: [], mtime: claudeNow, now: claudeNow.addingTimeInterval(120)),
+      "ClaudeCodeProvider: stopped turn pre-idle stays waiting, matches old logic")
+// (d) sub-agent rollup precedence preserved. A trailing tool_use makes the SESSION itself working;
+//     rolling in a finished sub-agent keeps it working (Rollup: any working ⇒ working) — and the
+//     idle downgrade can't fire because the rolled status isn't a wait. Identical to the old logic.
+let claudeToolUse = [
+    #"{"type":"user","cwd":"/Users/x/projects/repo-a","message":{"content":"hi"}}"#,
+    #"{"type":"assistant","message":{"id":"m1","content":[{"type":"text"},{"type":"tool_use"}]}}"#,
+]
+let claudeRolled = ClaudeCodeProvider.session(lines: claudeToolUse, fullID: "sess-a", mtime: claudeNow,
+        subDigests: [SubagentDigest(name: "t", status: .finished(.success), tokens: 0, durationSeconds: nil)],
+        now: claudeNow.addingTimeInterval(900))
+check(claudeRolled.status == .working
+      && claudeRolled.status == claudeOldStyle(lines: claudeToolUse, subStatuses: [.finished(.success)], mtime: claudeNow, now: claudeNow.addingTimeInterval(900)),
+      "ClaudeCodeProvider: working session + finished sub-agent stays working (Rollup preserved)")
+// (e) discovery against a real on-disk projects dir: a fresh transcript is found, an old one filtered.
+let claudeProjRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-claude-\(getpid())-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: claudeProjRoot, withIntermediateDirectories: true)
+fixtureWorkDirs.append(claudeProjRoot)
+let claudeProjDir = claudeProjRoot.appendingPathComponent("-Users-x-projects-repo-a")
+try? FileManager.default.createDirectory(at: claudeProjDir, withIntermediateDirectories: true)
+let claudeFresh = claudeProjDir.appendingPathComponent("sess-fresh.jsonl")
+try? claudeLinesWorking.joined(separator: "\n").write(to: claudeFresh, atomically: true, encoding: .utf8)
+let claudeOld = claudeProjDir.appendingPathComponent("sess-old.jsonl")
+try? claudeLinesWorking.joined(separator: "\n").write(to: claudeOld, atomically: true, encoding: .utf8)
+// Backdate the "old" transcript past the 30-min active window so discovery filters it out.
+try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: claudeOld.path)
+let claudeDiscovered = ClaudeCodeProvider(projectsDir: claudeProjRoot.path).poll(now: Date())
+check(claudeDiscovered.map(\.fullID) == ["sess-fresh"],
+      "ClaudeCodeProvider: discovery finds the fresh transcript, filters the >30-min-old one")
+check(ClaudeCodeProvider(projectsDir: "/no/such/projects/dir").poll() == [],
+      "ClaudeCodeProvider: an absent projects dir yields no sessions (never crashes)")
+
+// --- OpenCode message.data JSON → typed struct (parse fixtures, grounded in real db data) ---
+let ocAssistant = #"""
+{"role":"assistant","finish":"tool-calls","time":{"created":1771229252576,"completed":1771229407719},"tokens":{"total":35400,"input":2089,"output":243,"reasoning":90,"cache":{"read":33068,"write":0}},"path":{"cwd":"/Users/x/projects/svc"}}
+"""#
+let ocMsg = OpenCodeMessage.parse(ocAssistant)
+check(ocMsg?.role == "assistant" && ocMsg?.isAssistant == true, "OpenCode parse: role=assistant")
+check(ocMsg?.createdMs == 1771229252576 && ocMsg?.completedMs == 1771229407719,
+      "OpenCode parse: time.created/completed (large ms as Double coerced to Int)")
+check(ocMsg?.tokensTotal == 35400, "OpenCode parse: tokens.total extracted")
+check(ocMsg?.finish == "tool-calls", "OpenCode parse: finish extracted")
+check(ocMsg?.cwd == "/Users/x/projects/svc", "OpenCode parse: path.cwd extracted")
+let ocUser = #"{"role":"user","time":{"created":1771229162313}}"#
+let ocUserMsg = OpenCodeMessage.parse(ocUser)
+check(ocUserMsg?.role == "user" && ocUserMsg?.completedMs == nil && ocUserMsg?.tokensTotal == nil && ocUserMsg?.isAssistant == false,
+      "OpenCode parse: a user message has no completed/tokens")
+check(OpenCodeMessage.parse("not json") == nil && OpenCodeMessage.parse("") == nil,
+      "OpenCode parse: garbage / empty → nil")
+check(OpenCodeMessage.parse(#"{"time":{"created":1}}"#) == nil, "OpenCode parse: a blob with no role → nil")
+
+// --- OpenCode state mapping (poll-style; mirrors the Claude recency approach). now-anchored. ---
+let ocNow = Date(timeIntervalSince1970: 1_771_229_500)   // just after the real-data timestamps above
+func ms(_ secondsBeforeNow: Double) -> Int { Int((ocNow.timeIntervalSince1970 - secondsBeforeNow) * 1000) }
+func upd(_ secondsBeforeNow: Double) -> Date { ocNow.addingTimeInterval(-secondsBeforeNow) }
+// (1) assistant streaming (no completed) + recent → working.
+let ocStreaming = [OpenCodeMessage(role: "assistant", createdMs: ms(5), completedMs: nil, tokensTotal: 1200, finish: nil)]
+check(OpenCodeState.deriveStatus(messages: ocStreaming, lastUpdated: upd(3), now: ocNow) == .working,
+      "OpenCode state: streaming turn (no completed) → working")
+// (2) assistant finished on the tool-loop finish, recent → still working (mid-loop, like Claude's tool_use tail).
+let ocToolLoop = [OpenCodeMessage(role: "assistant", createdMs: ms(60), completedMs: ms(20), tokensTotal: 35400, finish: "tool-calls")]
+check(OpenCodeState.deriveStatus(messages: ocToolLoop, lastUpdated: upd(8), now: ocNow) == .working,
+      "OpenCode state: finish=tool-calls + recent → working (mid tool-loop)")
+// (3) terminal finish, idle within the wait window → waiting on the developer.
+let ocTerminal = [OpenCodeMessage(role: "assistant", createdMs: ms(120), completedMs: ms(60), tokensTotal: 9000, finish: "stop")]
+check(OpenCodeState.deriveStatus(messages: ocTerminal, lastUpdated: upd(60), now: ocNow) == .waitingForInput(.stoppedTurn),
+      "OpenCode state: terminal finish + idle (within wait window) → waiting(stoppedTurn)")
+// (4) terminal finish gone quiet past the idle window → finished/idle (downgrade, mirrors Claude poll).
+check(OpenCodeState.deriveStatus(messages: ocTerminal, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: terminal finish quiet >10min → finished/idle")
+// (5) tool-loop turn gone cold past idle → no longer looping → finished/idle.
+check(OpenCodeState.deriveStatus(messages: ocToolLoop, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: tool-loop gone cold past idle → finished/idle")
+// (6) streaming turn gone cold past idle (crashed/abandoned partial) → finished/idle, not stuck working.
+check(OpenCodeState.deriveStatus(messages: ocStreaming, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: streaming gone cold past idle → finished/idle (not stuck working)")
+// (7) a bare user message last (no assistant reply yet) → working (agent is processing).
+let ocUserLast = [OpenCodeMessage(role: "user", createdMs: ms(2))]
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: upd(2), now: ocNow) == .working,
+      "OpenCode state: user message last → working")
+// (8) no usable messages → working (spinning up).
+check(OpenCodeState.deriveStatus(messages: [], lastUpdated: upd(1), now: ocNow) == .working,
+      "OpenCode state: empty messages → working")
+// (9) terminal finish, very recent (within working window) → working (brief mid-turn lull).
+check(OpenCodeState.deriveStatus(messages: ocTerminal, lastUpdated: upd(5), now: ocNow) == .working,
+      "OpenCode state: terminal finish but very recent (<window) → working")
+// (10) PHANTOM-WORKING regression: a STALE user-last session (quiet past the idle window) must
+//      DOWNGRADE to finished/idle, NOT pin .working forever. Pre-fix this returned .working
+//      unconditionally (the unconditional user-last branch), pinning a stale row → defeats the
+//      keep-awake sleep assertion with no way to dismiss it. (FAILS before the recency gate.)
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: STALE user-last (quiet past idle) → finished/idle, NOT phantom-working")
+// (11) PHANTOM-WORKING regression: a STALE empty session (no usable messages, quiet past the idle
+//      window) must DOWNGRADE too. Pre-fix the empty-messages branch returned .working
+//      unconditionally — a session that never produced a message would pin .working forever.
+check(OpenCodeState.deriveStatus(messages: [], lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: STALE empty session (quiet past idle) → finished/idle, NOT phantom-working")
+// (12) the FRESH counterparts still read as working (the gate only fires past the idle window).
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: upd(2), now: ocNow) == .working
+      && OpenCodeState.deriveStatus(messages: [], lastUpdated: upd(2), now: ocNow) == .working,
+      "OpenCode state: FRESH user-last / empty session still → working (gate fires only past idle)")
+// (13) a nil time_updated is treated conservatively as stale → finished/idle, not pinned working.
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: nil, now: ocNow) == .finished(.success)
+      && OpenCodeState.deriveStatus(messages: [], lastUpdated: nil, now: ocNow) == .finished(.success),
+      "OpenCode state: missing time_updated treated as stale → finished/idle (conservative)")
+
+// --- OpenCode token extraction: latest assistant tokens.total (NOT summed). ---
+let ocTokMsgs = [
+    OpenCodeMessage(role: "user"),
+    OpenCodeMessage(role: "assistant", tokensTotal: 1000, finish: "tool-calls"),
+    OpenCodeMessage(role: "assistant", tokensTotal: 35400, finish: "tool-calls"),   // latest assistant
+]
+check(OpenCodeState.tokens(messages: ocTokMsgs) == 35400, "OpenCode tokens: latest assistant tokens.total (not summed)")
+check(OpenCodeState.tokens(messages: [OpenCodeMessage(role: "user")]) == 0, "OpenCode tokens: no assistant tokens → 0")
+
+// --- OpenCodeStore row → ProviderSession mapping (pure; archived excluded, sub-session excluded) ---
+let ocRowTop = OpenCodeStore.SessionRow(
+    id: "ses_top", parentID: nil, directory: "/Users/x/projects/svc-dir", title: "Refactor journey",
+    timeCreatedMs: ms(300), timeUpdatedMs: ms(60), timeArchivedMs: nil,
+    messages: [OpenCodeMessage(role: "assistant", createdMs: ms(120), completedMs: ms(60), tokensTotal: 35400, finish: "stop")])
+let ocRowSub = OpenCodeStore.SessionRow(
+    id: "ses_sub", parentID: "ses_top", directory: "/Users/x/projects/svc-dir", title: "sub task",
+    timeCreatedMs: ms(120), timeUpdatedMs: ms(60), timeArchivedMs: nil, messages: [])
+let ocRowArchived = OpenCodeStore.SessionRow(
+    id: "ses_arch", parentID: nil, directory: "/Users/x/projects/old", title: "Old",
+    timeCreatedMs: ms(9000), timeUpdatedMs: ms(8000), timeArchivedMs: ms(7000), messages: [])
+let ocMapped = OpenCodeStore.sessions(from: [ocRowTop, ocRowSub, ocRowArchived], now: ocNow)
+check(ocMapped.map(\.fullID) == ["ses_top"],
+      "OpenCodeStore: only top-level non-archived session becomes a row (sub-session + archived excluded)")
+// RECENCY drop: a non-archived top-level row whose time_updated is older than the activeWindow
+// (1800s) is DROPPED (mirroring the Claude poll path's discovery filter — no permanent phantom row),
+// while a freshly-updated sibling is KEPT. A row with NO time_updated is dropped (conservative).
+let ocRowStale = OpenCodeStore.SessionRow(
+    id: "ses_stale", parentID: nil, directory: "/Users/x/projects/stale-dir", title: "Stale work",
+    timeCreatedMs: ms(9000), timeUpdatedMs: ms(2000), timeArchivedMs: nil,   // updated 2000s ago > 1800s window
+    messages: [OpenCodeMessage(role: "user", createdMs: ms(2000))])
+let ocRowNoUpdated = OpenCodeStore.SessionRow(
+    id: "ses_noupd", parentID: nil, directory: "/Users/x/projects/noupd-dir", title: "No timestamp",
+    timeCreatedMs: ms(9000), timeUpdatedMs: nil, timeArchivedMs: nil, messages: [])
+let ocRecencyMapped = OpenCodeStore.sessions(from: [ocRowTop, ocRowStale, ocRowNoUpdated], now: ocNow)
+check(ocRecencyMapped.map(\.fullID) == ["ses_top"],
+      "OpenCodeStore.sessions(from:): DROPS a top-level row older than the activeWindow (and one with no time_updated), KEEPS the fresh one")
+check(ocMapped.first?.provider == .opencode, "OpenCodeStore: mapped session tagged .opencode")
+check(ocMapped.first?.label == "svc-dir", "OpenCodeStore: label = directory lastPathComponent")
+check(ocMapped.first?.title == "Refactor journey", "OpenCodeStore: title from session.title")
+check(ocMapped.first?.tokens == 35400, "OpenCodeStore: tokens from latest assistant tokens.total")
+check(ocMapped.first?.status == .waitingForInput(.stoppedTurn), "OpenCodeStore: terminal+idle → waiting (via OpenCodeState)")
+// title falls back to nil when blank → the App uses the label instead.
+let ocBlankTitle = OpenCodeStore.providerSession(from: OpenCodeStore.SessionRow(
+    id: "s", parentID: nil, directory: "/a/b/proj", title: "   ", timeCreatedMs: nil, timeUpdatedMs: nil,
+    timeArchivedMs: nil, messages: []), now: ocNow)
+check(ocBlankTitle.title == nil && ocBlankTitle.label == "proj",
+      "OpenCodeStore: blank title → nil; label falls back to dir name")
+
+// --- OpenCodeStore graceful failure: absent / non-db file → no sessions, never crashes ---
+check(OpenCodeStore.readSessions(path: "/no/such/opencode.db") == [],
+      "OpenCodeStore: absent db file → [] (no crash)")
+let ocGarbageDB = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-ocgarbage-\(getpid())-\(UUID().uuidString).db")
+try? Data("this is not a sqlite database".utf8).write(to: ocGarbageDB)
+fixtureWorkDirs.append(ocGarbageDB)
+check(OpenCodeStore.readSessions(path: ocGarbageDB.path) == [],
+      "OpenCodeStore: a non-sqlite file → [] (open/prepare fails gracefully)")
+check(OpenCodeProvider(dbPath: "/no/such/opencode.db").poll() == [],
+      "OpenCodeProvider: absent db → no sessions")
+
+// --- OpenCodeStore live SQLite read against a TINY fixture db with the REAL schema + rows ---
+//     (built in a temp dir; the real ~/.local/share/opencode/opencode.db is NEVER written.) ---
+let ocFixtureDB = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-ocfixture-\(getpid())-\(UUID().uuidString).db")
+fixtureWorkDirs.append(ocFixtureDB)
+func ocBuildFixtureDB(at path: String) -> Bool {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+        sqlite3_close(db); return false
+    }
+    defer { sqlite3_close(db) }
+    // Confirmed-schema subset (the columns the reader selects); NOT NULL/PK mirror the real db.
+    let schema = """
+    CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+        slug TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+    """
+    guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else { return false }
+    func exec(_ sql: String) -> Bool { sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK }
+    // One top-level session (terminal finish, idle) + one archived + one sub-session.
+    let tCreated = ms(300), tUpdated = ms(60)
+    let dataJSON = #"{"role":"assistant","finish":"stop","time":{"created":1,"completed":2},"tokens":{"total":12345},"path":{"cwd":"/x"}}"#
+        .replacingOccurrences(of: "'", with: "''")
+    var ok = exec("INSERT INTO session VALUES ('ses_live','prj',NULL,'slug','/Users/x/projects/live-repo','Live title','v1',\(tCreated),\(tUpdated),NULL);")
+    ok = ok && exec("INSERT INTO session VALUES ('ses_arch','prj',NULL,'slug','/x/old','Old','v1',\(ms(9000)),\(ms(8000)),\(ms(7000)));")
+    ok = ok && exec("INSERT INTO session VALUES ('ses_sub','prj','ses_live','slug','/x/live','Sub','v1',\(ms(120)),\(ms(60)),NULL);")
+    ok = ok && exec("INSERT INTO message VALUES ('msg1','ses_live',\(ms(120)),\(ms(60)),'\(dataJSON)');")
+    return ok
+}
+check(ocBuildFixtureDB(at: ocFixtureDB.path), "OpenCodeStore fixture: built a temp db with the real schema + rows")
+// `now: ocNow` so the SQL recency cutoff is anchored to the fixture's timestamps (which are built
+// relative to ocNow), not the wall clock. The fresh top-level row + the archived & sub rows are all
+// read (archived/sub are kept by the WHERE regardless of recency; sessions(from:) excludes them).
+let ocLiveRows = OpenCodeStore.readSessions(path: ocFixtureDB.path, now: ocNow)
+check(ocLiveRows.count == 3, "OpenCodeStore fixture: read all 3 session rows from SQLite")
+check(ocLiveRows.first(where: { $0.id == "ses_live" })?.messages.first?.tokensTotal == 12345,
+      "OpenCodeStore fixture: message.data JSON parsed off the live db (tokens.total)")
+check(ocLiveRows.first(where: { $0.id == "ses_sub" })?.isSubSession == true,
+      "OpenCodeStore fixture: parent_id set → isSubSession")
+check(ocLiveRows.first(where: { $0.id == "ses_arch" })?.isArchived == true,
+      "OpenCodeStore fixture: time_archived set → isArchived")
+let ocLiveSessions = OpenCodeStore.sessions(from: ocLiveRows, now: ocNow)
+check(ocLiveSessions.map(\.fullID) == ["ses_live"],
+      "OpenCodeStore fixture: end-to-end read+map yields only the live top-level session")
+check(ocLiveSessions.first?.label == "live-repo" && ocLiveSessions.first?.tokens == 12345
+      && ocLiveSessions.first?.provider == .opencode,
+      "OpenCodeStore fixture: mapped session has dir label, tokens, .opencode kind")
+// The whole provider end-to-end (poll → read → map) against the fixture db.
+check(OpenCodeProvider(dbPath: ocFixtureDB.path).poll(now: ocNow).map(\.fullID) == ["ses_live"],
+      "OpenCodeProvider: poll() against the fixture db yields the live session")
+
+// --- OpenCodeStore SQL-level recency cutoff: a STALE top-level row is dropped IN THE SQL READ (not
+//     just the pure mapping), so the per-poll read of sessions+messages is bounded by recency. Build
+//     a second fixture with a fresh AND a stale top-level row + a stale message on each. ---
+let ocRecencyDB = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-ocrecency-\(getpid())-\(UUID().uuidString).db")
+fixtureWorkDirs.append(ocRecencyDB)
+func ocBuildRecencyDB(at path: String) -> Bool {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+        sqlite3_close(db); return false
+    }
+    defer { sqlite3_close(db) }
+    let schema = """
+    CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+        slug TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+    """
+    guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else { return false }
+    func exec(_ sql: String) -> Bool { sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK }
+    let assistantData = #"{"role":"assistant","finish":"stop","time":{"created":1,"completed":2},"tokens":{"total":7}}"#
+    // fresh: updated 60s ago (< 1800s window). stale: updated 2000s ago (> window).
+    var ok = exec("INSERT INTO session VALUES ('ses_fresh','prj',NULL,'slug','/x/fresh','Fresh','v1',\(ms(300)),\(ms(60)),NULL);")
+    ok = ok && exec("INSERT INTO session VALUES ('ses_old','prj',NULL,'slug','/x/old','Old','v1',\(ms(9000)),\(ms(2000)),NULL);")
+    ok = ok && exec("INSERT INTO message VALUES ('mf','ses_fresh',\(ms(120)),\(ms(60)),'\(assistantData)');")
+    ok = ok && exec("INSERT INTO message VALUES ('mo','ses_old',\(ms(9000)),\(ms(2000)),'\(assistantData)');")
+    return ok
+}
+check(ocBuildRecencyDB(at: ocRecencyDB.path), "OpenCodeStore recency fixture: built a temp db with a fresh + a stale top-level row")
+let ocRecencyRows = OpenCodeStore.readSessions(path: ocRecencyDB.path, now: ocNow)
+check(ocRecencyRows.map(\.id).sorted() == ["ses_fresh"],
+      "OpenCodeStore: SQL read DROPS the stale top-level row (time_updated < cutoff), KEEPS the fresh one")
+check(ocRecencyRows.first?.messages.count == 1,
+      "OpenCodeStore: messages are only read for the kept (fresh) session, not the dropped stale one")
+check(OpenCodeProvider(dbPath: ocRecencyDB.path).poll(now: ocNow).map(\.fullID) == ["ses_fresh"],
+      "OpenCodeProvider: poll() drops the stale top-level session end-to-end")
+
+// --- Daemon-fresh merge: OpenCode poll rows must appear ALONGSIDE the Claude daemon rows WITHOUT
+//     perturbing the daemon rows' relative order. SessionMergeOrder is the exact rule the App's
+//     activeSessions() daemon-fresh branch uses (priority asc, then lastActivity desc, STABLE). We
+//     model the merge over ProviderSession (daemon rows carry no lastActivity → nil). ---
+func pSess(_ id: String, _ status: AgentStatus, _ last: Date?, _ prov: SessionProviderKind = .claude) -> ProviderSession {
+    ProviderSession(provider: prov, fullID: id, label: id, title: nil, status: status, tokens: 0,
+                    startedAt: nil, lastActivity: last)
+}
+// Daemon rows (Claude), nil lastActivity, in their authoritative (sessionID-sorted) order. Two are
+// waiting (rank 1, higher priority), one working (rank 3). OpenCode rows have real lastActivity.
+// Ranks: waiting(stoppedTurn)=1, working=3 (waiting is HIGHER priority / sorts first).
+let daemonRows = [
+    pSess("c-a", .waitingForInput(.stoppedTurn), nil),
+    pSess("c-b", .working, nil),
+    pSess("c-c", .waitingForInput(.stoppedTurn), nil),
+]
+let ocMergeRows = [
+    pSess("oc-work", .working, ocNow.addingTimeInterval(-5), .opencode),
+    pSess("oc-wait", .waitingForInput(.stoppedTurn), ocNow.addingTimeInterval(-5), .opencode),
+]
+let mergedOrder = SessionMergeOrder.ordered(daemonRows + ocMergeRows, status: \.status, lastActivity: \.lastActivity)
+// OpenCode rows are PRESENT in the merged list — i.e. visible alongside the daemon rows (the LOW fix).
+check(Set(mergedOrder.map(\.fullID)) == ["c-a", "c-b", "c-c", "oc-work", "oc-wait"],
+      "SessionMergeOrder: all daemon + OpenCode rows present after merge (OpenCode visible in daemon mode)")
+// The Claude daemon rows preserve their RELATIVE order WITHIN a priority rank (the stability
+// guarantee): both waiting daemon rows tie on rank+nil-activity, so c-a stays before c-c — not
+// perturbed by the merge. This is the "daemon order not disturbed" invariant.
+let daemonWaitsOrder = mergedOrder.filter { $0.provider == .claude && DisplayPriority.rank($0.status) == 1 }.map(\.fullID)
+check(daemonWaitsOrder == ["c-a", "c-c"],
+      "SessionMergeOrder: equal-rank daemon rows keep their relative order (stable — c-a before c-c)")
+// Full order via the standard comparator (rank asc, then lastActivity desc, stable on ties):
+//   rank 1 (waiting): oc-wait (fresh) > c-a > c-c (both nil, stable). rank 3 (working): oc-work > c-b.
+check(mergedOrder.map(\.fullID) == ["oc-wait", "c-a", "c-c", "oc-work", "c-b"],
+      "SessionMergeOrder: priority asc then recency desc; fresh OpenCode rows sort above nil-activity daemon rows within a rank")
 
 // Tidy up every fixture / install-root / scratch dir built above. (Top-level `defer` would be skipped
 // by the `exit()` below, so cleanup is explicit — matching the SettingsFile temp-dir teardown earlier.)
