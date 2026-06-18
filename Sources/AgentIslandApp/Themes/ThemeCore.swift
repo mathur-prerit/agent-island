@@ -60,9 +60,28 @@ extension IslandTheme {
 }
 
 enum Themes {
-    /// First entry is the default.
-    static let all: [IslandTheme] = [JourneyTheme(), MinimalTheme()]
-    static func named(_ id: String?) -> IslandTheme { all.first { $0.id == id } ?? all[0] }
+    /// Built-in CODE themes — always first, so the default (index 0) stays Road Runner (`journey`).
+    /// A code theme can do anything Core Graphics can; data themes are appended after these.
+    static let codeThemes: [IslandTheme] = [JourneyTheme(), MinimalTheme()]
+
+    private static var discovered: [IslandTheme] = []
+    private static var didLoad = false
+
+    /// Code themes first, then discovered data themes. Lazily discovers on first access so callers
+    /// (menu, panel) need no setup; `reload()` re-scans (e.g. after a theme download).
+    static var all: [IslandTheme] {
+        if !didLoad { reload() }
+        return codeThemes + discovered
+    }
+
+    static func named(_ id: String?) -> IslandTheme { all.first { $0.id == id } ?? codeThemes[0] }
+
+    /// (Re)discover data themes from the bundle + `~/.agent-island/themes/`. Idempotent. Ids that
+    /// collide with a code theme are dropped so a data theme can never shadow a built-in.
+    static func reload() {
+        didLoad = true
+        discovered = ManifestThemeDiscovery.discoverAll(excludingIDs: Set(codeThemes.map(\.id)))
+    }
 }
 
 /// Shared per-state background tint (subtle; alpha applied by the row). Module-internal so the

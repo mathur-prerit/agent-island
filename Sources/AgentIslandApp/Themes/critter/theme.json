@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "critter",
+  "displayName": "Pixel Critter",
+  "minAppVersion": "0.1.0",
+  "showsPersonaGlyph": true,
+  "palette": { "accent": "#5AC8FA", "spark": "#FF6E5A" },
+  "tint": {
+    "working": "accent",
+    "waitingPermission": "system:orange",
+    "failed": "system:red",
+    "finished": "system:green"
+  },
+  "states": {
+    "working": {
+      "visual": { "kind": "sprite", "sheet": "sprites/walk.png", "frameWidth": 24, "frameHeight": 24, "frameCount": 4, "fps": 8 },
+      "sound": { "file": "sounds/blip.wav", "trigger": "onEnter", "volume": 0.5 }
+    },
+    "waitingPermission": { "visual": { "kind": "image", "file": "images/alert.png" } },
+    "waitingTurnEnd": { "visual": { "kind": "text", "string": "zZ", "color": "system:secondaryLabel" } },
+    "finished": { "visual": { "kind": "symbol", "name": "checkmark.circle.fill", "tint": "system:green" } },
+    "failed": { "visual": { "kind": "symbol", "name": "xmark.octagon.fill", "tint": "system:red" } },
+    "idle": { "visual": { "kind": "text", "string": "·", "color": "system:tertiaryLabel" } }
+  },
+  "layout": { "ownRow": false, "size": { "width": 26, "height": 24 } }
+}

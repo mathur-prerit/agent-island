@@ -7,6 +7,8 @@ let package = Package(
     products: [
         .library(name: "AgentIslandCore", targets: ["AgentIslandCore"]),
         .library(name: "PersonaKit", targets: ["PersonaKit"]),
+        // AppKit-free data-theme manifest model + strict loader/validator (data themes, schema v1).
+        .library(name: "AgentIslandThemes", targets: ["AgentIslandThemes"]),
         .library(name: "HookInstall", targets: ["HookInstall"]),
         .library(name: "AgentIslandDaemon", targets: ["AgentIslandDaemon"]),
         // Framework-free test runner — runs under Command Line Tools (no full Xcode /
@@ -25,20 +27,24 @@ let package = Package(
     targets: [
         .target(name: "AgentIslandCore"),
         .target(name: "PersonaKit", dependencies: ["AgentIslandCore"]),
+        // AppKit-free: depends on PersonaKit (PackValidator path/asset checks) → Core transitively.
+        .target(name: "AgentIslandThemes", dependencies: ["PersonaKit"]),
         .target(name: "HookInstall"),
         .target(name: "AgentIslandDaemon", dependencies: ["AgentIslandCore"]),
         .executableTarget(
             name: "AgentIslandSelfTest",
-            dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon"]),
+            dependencies: ["AgentIslandCore", "PersonaKit", "HookInstall", "AgentIslandDaemon",
+                           "AgentIslandThemes"]),
         .executableTarget(name: "AgentIslandDemo", dependencies: ["AgentIslandCore"]),
         .executableTarget(
             name: "AgentIslandApp",
-            dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon", "HookInstall"],
+            dependencies: ["AgentIslandCore", "PersonaKit", "AgentIslandDaemon", "HookInstall",
+                           "AgentIslandThemes"],
             // Per-theme bundled resources (first use of Bundle.module). `.copy` keeps the folder
             // structure verbatim so relative lookups resolve. The theme-spec doc is source-tree
             // docs, not a runtime resource — exclude it so SwiftPM doesn't warn/bundle it.
             exclude: ["Themes/README.md"],
-            resources: [.copy("Themes/RoadRunner"), .copy("Themes/Default")]),
+            resources: [.copy("Themes/RoadRunner"), .copy("Themes/Default"), .copy("Themes/critter")]),
         .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "agentislandd", dependencies: ["AgentIslandDaemon", "AgentIslandCore"]),
     ]

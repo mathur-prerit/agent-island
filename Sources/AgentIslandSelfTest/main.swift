@@ -4,6 +4,7 @@ import AgentIslandCore
 import PersonaKit
 import HookInstall
 import AgentIslandDaemon
+import AgentIslandThemes
 
 // Framework-free self-test. Runs under Command Line Tools (no Xcode/XCTest/Testing).
 // `swift run AgentIslandSelfTest` — exits non-zero on any failure (usable in CI).
@@ -505,6 +506,136 @@ check(TranscriptDigest.scan(lines: titleLines).title == ConversationTitle.fromTr
       "scan.title matches fromTranscript on the title fixture")
 check(TranscriptDigest.scan(lines: tsLines).startedAt == TranscriptClock.startedAt(lines: tsLines),
       "scan.startedAt matches startedAt on the timestamp fixture")
+
+// --- Data-theme manifest: pure helpers (sprite clock, semver, colour-ref syntax) ---
+// Sprite frame index: 10 Hz ticker, 10 fps, 4 frames → one cell per tick, wrapping.
+check(SpriteClock.frameIndex(tick: 0, fps: 10, frameCount: 4) == 0, "sprite clock: tick 0 -> frame 0")
+check(SpriteClock.frameIndex(tick: 3, fps: 10, frameCount: 4) == 3, "sprite clock: tick 3 @10fps -> frame 3")
+check(SpriteClock.frameIndex(tick: 4, fps: 10, frameCount: 4) == 0, "sprite clock: wraps at frameCount")
+check(SpriteClock.frameIndex(tick: 5, fps: 20, frameCount: 4) == 2, "sprite clock: 20fps advances 2 cells/tick (10/(10) ) -> (5*20/10)%4=2")
+check(SpriteClock.frameIndex(tick: 100, fps: 0, frameCount: 4) == 0, "sprite clock: fps 0 freezes on frame 0")
+check(SpriteClock.frameIndex(tick: 5, fps: 10, frameCount: 0) == 0, "sprite clock: frameCount 0 -> 0 (no divide-by-zero)")
+check(SemVer.isAtLeast("0.3.0", "0.3.0") && SemVer.isAtLeast("0.4.0", "0.3.0") && SemVer.isAtLeast("1.0", "0.9.9"),
+      "semver: equal / newer / fewer-components-but-greater all satisfy")
+check(!SemVer.isAtLeast("0.2.9", "0.3.0") && !SemVer.isAtLeast("0.3.0", "0.3.1"), "semver: older app fails the minimum")
+check(SemVer.isAtLeast("0.1.0", nil) && SemVer.isAtLeast("0.1.0", ""), "semver: nil/blank minimum always satisfied")
+check(ColorRefSyntax.isHex("#E52521") && ColorRefSyntax.isHex("#E52521FF"), "colour: 6- and 8-digit hex valid")
+check(!ColorRefSyntax.isHex("#E525") && !ColorRefSyntax.isHex("#GGGGGG") && !ColorRefSyntax.isHex("E52521"),
+      "colour: wrong-length / non-hex / missing-hash rejected")
+check(ColorRefSyntax.isValid("clear", palette: [:]) && ColorRefSyntax.isValid("system:teal", palette: [:]),
+      "colour: clear + system:<name> valid")
+check(ColorRefSyntax.isValid("accent", palette: ["accent": "#E52521"]) && !ColorRefSyntax.isValid("accent", palette: [:]),
+      "colour: palette name valid only when present in palette")
+
+// --- Data-theme manifest: a full valid manifest decodes to the expected typed model ---
+let validManifest = """
+{
+  "schemaVersion": 1,
+  "id": "critter",
+  "displayName": "Pixel Critter",
+  "minAppVersion": "0.1.0",
+  "showsPersonaGlyph": false,
+  "palette": { "accent": "#5AC8FA" },
+  "tint": { "working": "accent", "waitingPermission": "system:orange" },
+  "states": {
+    "working": {
+      "visual": { "kind": "sprite", "sheet": "sprites/walk.png", "frameWidth": 24, "frameHeight": 24, "frameCount": 4, "fps": 8 },
+      "sound": { "file": "sounds/blip.wav", "trigger": "onEnter", "volume": 0.6 }
+    },
+    "waitingPermission": { "visual": { "kind": "image", "file": "images/look.png" } },
+    "waitingTurnEnd":   { "visual": { "kind": "text", "string": "zzz", "color": "system:secondaryLabel" } },
+    "finished": { "visual": { "kind": "symbol", "name": "checkmark.circle.fill", "tint": "system:green" } },
+    "failed":   { "visual": { "kind": "symbol", "name": "xmark.octagon.fill", "tint": "#FF3B30" } },
+    "idle":     { "visual": { "kind": "text", "string": "·", "color": "clear" } }
+  },
+  "layout": { "ownRow": false, "size": { "width": 28, "height": 24 } }
+}
+"""
+func loadTheme(_ s: String, folder: String = "critter", app: String = "0.3.0") -> Result<ThemeManifest, ThemeRejection> {
+    ThemeManifestLoader.load(data: Data(s.utf8), folderName: folder, appVersion: app)
+}
+if case .success(let m) = loadTheme(validManifest) {
+    check(m.id == "critter" && m.displayName == "Pixel Critter" && !m.showsPersonaGlyph, "manifest: scalar fields decode")
+    check(m.palette["accent"] == "#5AC8FA" && m.tint["working"] == "accent", "manifest: palette + tint decode")
+    check(m.states["working"]?.visual == .sprite(sheet: "sprites/walk.png", frameWidth: 24, frameHeight: 24, frameCount: 4, fps: 8),
+          "manifest: sprite visual decodes with dims")
+    check(m.states["working"]?.sound == SoundSpec(file: "sounds/blip.wav", trigger: .onEnter, volume: 0.6),
+          "manifest: sound spec decodes")
+    check(m.states["idle"]?.visual == .text(string: "·", color: "clear"), "manifest: text visual decodes")
+    check(m.states["finished"]?.visual == .symbol(name: "checkmark.circle.fill", tint: "system:green"),
+          "manifest: symbol visual decodes")
+    check(m.layout == Layout(ownRow: false, size: Layout.Size(width: 28, height: 24)), "manifest: layout decodes")
+} else {
+    check(false, "manifest: a valid manifest must load")
+}
+
+// --- Data-theme manifest: every rejection path ---
+func rejects(_ s: String, _ expected: ThemeRejection, _ name: String, folder: String = "critter", app: String = "0.3.0") {
+    switch loadTheme(s, folder: folder, app: app) {
+    case .failure(let r): check(r == expected, r == expected ? name : "\(name) [got \(r), expected \(expected)]")
+    case .success: check(false, "\(name) (expected rejection, got success)")
+    }
+}
+check({ if case .failure(.invalidJSON) = loadTheme("not json at all") { return true }; return false }(),
+      "manifest: non-JSON -> invalidJSON")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{},"bogus":true}"#,
+        .unknownField("bogus"), "manifest: unknown top-level key rejected (no smuggling)")
+rejects(#"{"schemaVersion":2,"id":"critter","displayName":"x","states":{}}"#,
+        .unsupportedSchemaVersion(2), "manifest: schemaVersion != 1 rejected")
+rejects(#"{"id":"critter","displayName":"x","states":{}}"#,
+        .missingField("schemaVersion"), "manifest: missing schemaVersion rejected")
+rejects(#"{"schemaVersion":1,"id":"mario","displayName":"x","states":{}}"#,
+        .idFolderMismatch(id: "mario", folder: "critter"), "manifest: id must equal folder name")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"bogus":{"visual":{"kind":"text","string":"·"}}}}"#,
+        .unknownState("bogus"), "manifest: unknown state id rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","minAppVersion":"9.9.9","states":{}}"#,
+        .appTooOld(required: "9.9.9"), "manifest: minAppVersion > app rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"wormhole"}}}}"#,
+        .unknownVisualKind("wormhole"), "manifest: unknown visual kind rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"idle":{"visual":{"kind":"text"}}}}"#,
+        .missingField("states.idle.visual.string"), "manifest: missing required visual field rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"image","file":"../escape.png"}}}}"#,
+        .asset(.pathTraversal("../escape.png")), "manifest: Zip-Slip asset path rejected (PackValidator)")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"image","file":"images/evil.svg"}}}}"#,
+        .asset(.disallowedAsset("images/evil.svg")), "manifest: SVG image rejected (script-bearing)")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"text","string":"x"},"sound":{"file":"s/x.mp3"}}}}"#,
+        .asset(.disallowedAsset("s/x.mp3")), "manifest: non-allowlisted audio (mp3) rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"text","string":"x"},"sound":{"file":"../x.wav"}}}}"#,
+        .asset(.pathTraversal("../x.wav")), "manifest: Zip-Slip audio path rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"text","string":"x"},"sound":{"file":"s/x.wav","trigger":"explode"}}}}"#,
+        .badSoundTrigger("explode"), "manifest: bad sound trigger rejected")
+rejects(##"{"schemaVersion":1,"id":"critter","displayName":"x","tint":{"working":"#GGG"},"states":{}}"##,
+        .badColorRef("#GGG"), "manifest: bad colour ref rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"sprite","sheet":"s/x.png","frameWidth":0,"frameHeight":24,"frameCount":4,"fps":8}}}}"#,
+        .wrongType("states.working.visual (sprite dims must be > 0)"), "manifest: non-positive sprite dim rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"idle":{"visual":{"kind":"text","string":"·"},"bogus":1}}}"#,
+        .unknownField("states.idle.bogus"), "manifest: unknown key inside a state rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"idle":{"visual":{"kind":"text","string":"·","bogus":1}}}}"#,
+        .unknownField("states.idle.visual.bogus"), "manifest: unknown key inside a visual rejected")
+// Volume clamps to 0…1 rather than rejecting.
+if case .success(let m) = loadTheme(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"text","string":"x"},"sound":{"file":"s/x.wav","volume":9}}}}"#) {
+    check(m.states["working"]?.sound?.volume == 1.0, "manifest: out-of-range volume clamps to 1.0")
+} else { check(false, "manifest: volume-clamp manifest must load") }
+
+// Strict typing across the JSONSerialization Bool/Int NSNumber bridge (a JSON bool casts to Int=1 and
+// a JSON int 0/1 casts to Bool with a naive `as?` — the loader must reject both for typed fields).
+rejects(#"{"schemaVersion":true,"id":"critter","displayName":"x","states":{}}"#,
+        .wrongType("schemaVersion"), "manifest: JSON bool rejected where Int (schemaVersion) required")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","showsPersonaGlyph":1,"states":{}}"#,
+        .wrongType("showsPersonaGlyph"), "manifest: JSON int rejected where Bool (showsPersonaGlyph) required")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"sprite","sheet":"s/x.png","frameWidth":true,"frameHeight":24,"frameCount":4,"fps":8}}}}"#,
+        .wrongType("states.working.visual.frameWidth"), "manifest: JSON bool rejected where Int (sprite dim) required")
+// Sprite dimensions are bounded (untrusted values flow into `i * frameWidth` / a slicing loop).
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"sprite","sheet":"s/x.png","frameWidth":999999,"frameHeight":24,"frameCount":4,"fps":8}}}}"#,
+        .wrongType("states.working.visual (sprite dims out of range)"), "manifest: oversized sprite dim rejected (overflow/DoS guard)")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"sprite","sheet":"s/x.png","frameWidth":24,"frameHeight":24,"frameCount":999999,"fps":8}}}}"#,
+        .wrongType("states.working.visual (sprite dims out of range)"), "manifest: oversized frameCount rejected (slicer DoS guard)")
+// A system: colour must name one the resolver actually supports (no pass-then-silently-fallback).
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tint":{"working":"system:turquoise"},"states":{}}"#,
+        .badColorRef("system:turquoise"), "manifest: unknown system colour name rejected")
+check(ColorRefSyntax.isValid("system:teal", palette: [:]) && ColorRefSyntax.isValid("system:secondaryLabel", palette: [:])
+      && !ColorRefSyntax.isValid("system:bogus", palette: [:]),
+      "colour: system name validated against the shared resolver allowlist")
 
 print("")
 if failures == 0 {
