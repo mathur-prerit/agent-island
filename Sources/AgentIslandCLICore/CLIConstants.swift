@@ -6,8 +6,11 @@ import Foundation
 // `agentisland` executable wires these to URLSession / FileManager / SMAppService / CFPreferences.
 
 public enum CLIConstants {
-    /// The CLI version — the single source of truth for `agentisland version`. Kept in lockstep with
-    /// `Scripts/build-app.sh`'s `VERSION` and the `AppInfo.version` fallback (they all ship together).
+    /// The CLI version — the single source of truth for `agentisland version`. The release CI
+    /// (`.github/workflows/release.yml`) sed-stamps this literal from the git tag before building, so a
+    /// released `agentisland` reports the released version (otherwise `update` would loop offering an
+    /// "update" to the version already installed). The literal here is the DEV fallback; keep it in
+    /// lockstep with `Scripts/build-app.sh`'s `VERSION` and the `AppInfo.version` fallback.
     public static let version = "0.3.0"
 
     /// The app's preferences domain — the bundle id stamped into `Info.plist` by `build-app.sh`. The

@@ -53,7 +53,10 @@ if [ -f "$ICON_SRC" ] && command -v iconutil >/dev/null 2>&1 && command -v sips 
   for pair in 16:16 16:32 32:32 32:64 128:128 128:256 256:256 256:512 512:512 512:1024; do
     logical="${pair%%:*}"; px="${pair##*:}"
     if [ "$px" = "$logical" ]; then name="icon_${logical}x${logical}.png"; else name="icon_${logical}x${logical}@2x.png"; fi
-    sips -z "$px" "$px" "$ICON_SRC" --out "$ICONSET/$name" >/dev/null 2>&1
+    # Guarded: a corrupt/non-image source makes sips exit non-zero, which under `set -euo pipefail`
+    # would abort the ENTIRE build (and, in CI, a zero-artifact release). Degrade to no-icon instead.
+    sips -z "$px" "$px" "$ICON_SRC" --out "$ICONSET/$name" >/dev/null 2>&1 \
+      || { echo "warning: icon conversion failed (size $px); shipping without a custom icon" >&2; break; }
   done
   if iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"; then
     echo "Generated AppIcon.icns"

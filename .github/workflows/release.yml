@@ -36,6 +36,15 @@ jobs:
       - name: Swift version
         run: swift --version
 
+      - name: Stamp CLI version from the tag
+        # build-app.sh stamps the app's Info.plist, but the management CLI's version is a compiled-in
+        # literal (CLIConstants.version). Stamp it from the tag too, or `agentisland version` would lie
+        # and `agentisland update` would offer an "update" forever (installed<latest) after the first bump.
+        run: |
+          ver="${{ steps.v.outputs.ver }}"
+          sed -i '' "s/public static let version = \"[^\"]*\"/public static let version = \"${ver}\"/" Sources/AgentIslandCLICore/CLIConstants.swift
+          grep 'public static let version' Sources/AgentIslandCLICore/CLIConstants.swift
+
       - name: Build app + CLIs (release), version-stamped from the tag
         run: |
           VERSION="${{ steps.v.outputs.ver }}" bash Scripts/build-app.sh
@@ -62,6 +71,11 @@ jobs:
           ditto -c -k clistage "agentisland-cli-${ver}-${arch}.zip"
           shasum -a 256 "AgentIsland-${ver}-${arch}.zip" "agentisland-cli-${ver}-${arch}.zip" > "checksums-${arch}.txt"
 
+      # NOTE: the two matrix jobs (arm64 + x86_64) both attach to the SAME release. softprops/action-gh-release
+      # handles concurrent uploads of DISTINCT asset names (each job uploads its own -<arch> files), so this is
+      # safe. Do NOT add a `concurrency` group keyed on the ref — it would cancel one arch. Publish as a full
+      # (non-prerelease) release so install.sh's `releases/latest` resolves it (it falls back to the releases
+      # list if not, but the one-liner is snappiest when /latest hits).
       - name: Attach to the release
         uses: softprops/action-gh-release@v2
         with:

@@ -74,13 +74,18 @@ ensure_bin_dir() {
 # the self-test all assume that name).
 install_bin() {
   local src="$1" dest="${BIN_DIR}/$2"
-  [ -f "$src" ] || { warn "missing binary $src; skipping $2"; return; }
-  if cp "$src" "$dest" 2>/dev/null; then
-    chmod +x "$dest"
+  [ -f "$src" ] || { warn "missing binary $src; skipping $2"; return 1; }
+  # Atomic: copy to a temp name, chmod, then rename over the dest. `agentisland update` re-runs this
+  # while the very `agentisland` being overwritten is the running process; an in-place `cp` (O_TRUNC)
+  # could ETXTBSY or leave a torn binary. rename() swaps the directory entry without touching the inode
+  # the running process holds open.
+  if cp "$src" "${dest}.new" 2>/dev/null && chmod +x "${dest}.new" && mv -f "${dest}.new" "$dest" 2>/dev/null; then
+    return 0
   else
+    rm -f "${dest}.new" 2>/dev/null || true
     warn "could not write ${dest}. Re-run with sudo, or set AGENT_ISLAND_BIN_DIR to a writable dir, e.g.:"
     warn "    AGENT_ISLAND_BIN_DIR=\$HOME/.local/bin sh -c \"\$(curl -fsSL ${REPO_URL}/raw/main/install.sh)\""
-    return
+    return 1
   fi
 }
 
@@ -91,6 +96,10 @@ check_bin_on_path() {
     *) warn "${BIN_DIR} is not on your PATH — add it (e.g. echo 'export PATH=\"${BIN_DIR}:\$PATH\"' >> ~/.zshrc)" ;;
   esac
 }
+
+# True iff both CLIs actually landed in BIN_DIR. Lets the caller avoid claiming success when a
+# non-writable BIN_DIR meant the .app installed but the `agentisland` CLI never made it onto PATH.
+clis_installed() { [ -x "${BIN_DIR}/agentisland" ] && [ -x "${BIN_DIR}/agentisland-hook" ]; }
 
 wire_hooks() {
   # Use the just-installed hook CLI if it's on PATH, else the freshly built/extracted one. Backup-aware
@@ -129,7 +138,12 @@ try_release_install() {
 
   local tag ver tmp appurl cliurl appzip clizip
   if [ "$RELEASE" = "latest" ]; then
+    # /releases/latest is the newest NON-prerelease, non-draft release. Fall back to the /releases list
+    # (which includes prereleases) and take the first (newest) tag, so a 0.x prerelease still installs
+    # prebuilt instead of forcing every one-liner user through a from-source build.
     tag="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    [ -n "${tag:-}" ] || tag="$(curl -fsSL "https://api.github.com/repos/${REPO_SLUG}/releases?per_page=1" 2>/dev/null \
             | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   else
     tag="$RELEASE"
@@ -175,11 +189,16 @@ try_release_install() {
   install_app_atomic "$staged_app"
   log "Installing CLI binaries to ${BIN_DIR}…"
   ensure_bin_dir
-  install_bin "$tmp/cli/agentisland" "agentisland"
-  install_bin "$tmp/cli/agentisland-hook" "agentisland-hook"
+  install_bin "$tmp/cli/agentisland" "agentisland" || true
+  install_bin "$tmp/cli/agentisland-hook" "agentisland-hook" || true
   check_bin_on_path
   wire_hooks "$tmp/cli/agentisland-hook"
-  log "Installed prebuilt ${tag}."
+  if clis_installed; then
+    log "Installed prebuilt ${tag}."
+  else
+    log "Installed prebuilt ${tag} app — but the CLI didn't land in ${BIN_DIR} (see the warning above)."
+    log "Re-run with sudo, or: AGENT_ISLAND_BIN_DIR=\$HOME/.local/bin sh -c \"\$(curl -fsSL ${REPO_URL}/raw/main/install.sh)\""
+  fi
   return 0
 }
 
@@ -203,8 +222,10 @@ source_install() {
     clone_dir="$(mktemp -d)"
     if [ "$RELEASE" != "latest" ] && [ "$RELEASE" != "source" ]; then
       log "Cloning ${REPO_URL} @ ${RELEASE} into ${clone_dir}…"
+      # On a tag-clone failure (bad tag, or an interrupted transfer that left clone_dir non-empty), reset
+      # the dir before the fallback clone — `git clone` into a non-empty dir errors out.
       git clone --depth 1 --branch "$RELEASE" "$REPO_URL" "$clone_dir" \
-        || git clone --depth 1 "$REPO_URL" "$clone_dir"
+        || { rm -rf "$clone_dir"; mkdir -p "$clone_dir"; git clone --depth 1 "$REPO_URL" "$clone_dir"; }
     else
       log "Cloning ${REPO_URL} into ${clone_dir}…"
       git clone --depth 1 "$REPO_URL" "$clone_dir"

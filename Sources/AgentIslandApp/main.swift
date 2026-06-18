@@ -13,7 +13,7 @@ import AgentIslandThemes
 // state.json when it's running). Each session wears a persona (PersonaKit). Plain
 // SwiftPM executable: `swift run AgentIslandApp`.
 
-final class AppController: NSObject {
+final class AppController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let island = IslandPanel()
@@ -28,6 +28,11 @@ final class AppController: NSObject {
     // closed on battery — clamshell sleep is a separate mechanism.)
     private var sleepToken: NSObjectProtocol?
     private let keepAwakeKey = "islandKeepAwake"   // UserDefaults bool; default off
+
+    // Cached login-item state. SMAppService.status is a synchronous launchd/XPC query; reading it on
+    // every 3s refresh() would hitch the main thread. We cache it and re-query only at start, after the
+    // user toggles it, and when the menu is about to open (menuWillOpen) — where freshness actually matters.
+    private var loginItemEnabled = false
 
     // Click-to-focus: the owning terminal's window identity per session (keyed by fullID), captured
     // at SessionStart by the hook and carried in the daemon snapshot. Empty in polling mode.
@@ -77,6 +82,8 @@ final class AppController: NSObject {
         statusItem.button?.imagePosition = .imageLeading
         menu.autoenablesItems = false
         statusItem.menu = menu
+        menu.delegate = self                                       // re-query login status on open (see menuWillOpen)
+        loginItemEnabled = (SMAppService.mainApp.status == .enabled)
         dismissedFinished = Set(UserDefaults.standard.stringArray(forKey: dismissedKey) ?? [])
         island.onDismiss = { [weak self] id in self?.dismissFinished(id) }
         island.onFocus = { [weak self] id in self?.focusWindow(id) }
@@ -242,7 +249,7 @@ final class AppController: NSObject {
         // app as a login item from INSIDE the running .app is the reliable SMAppService path.
         let loginToggle = NSMenuItem(title: "Launch at login", action: #selector(toggleLoginItem), keyEquivalent: "")
         loginToggle.target = self; loginToggle.isEnabled = true
-        loginToggle.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        loginToggle.state = loginItemEnabled ? .on : .off   // cached; refreshed on toggle + menuWillOpen
         menu.addItem(loginToggle)
 
         menu.addItem(.separator())
@@ -509,6 +516,7 @@ final class AppController: NSObject {
         } catch {
             openLoginItemsSettings()
         }
+        loginItemEnabled = (svc.status == .enabled)   // refresh the cache after toggling
         refresh()
     }
 
@@ -516,6 +524,14 @@ final class AppController: NSObject {
         if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// Re-query the login-item status only when the menu is about to open (keeps the synchronous
+    /// SMAppService call out of the 3s refresh loop). Rebuild if it changed since we last cached it, so
+    /// the checkmark reflects a change made elsewhere (e.g. System Settings ▸ Login Items).
+    func menuWillOpen(_ menu: NSMenu) {
+        let now = (SMAppService.mainApp.status == .enabled)
+        if now != loginItemEnabled { loginItemEnabled = now; refresh() }
     }
 
     /// Focus the terminal owning the session clicked in the menu (reuses the island's click-to-focus:
