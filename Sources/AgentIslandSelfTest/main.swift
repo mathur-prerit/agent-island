@@ -519,6 +519,51 @@ check(SemVer.isAtLeast("0.3.0", "0.3.0") && SemVer.isAtLeast("0.4.0", "0.3.0") &
       "semver: equal / newer / fewer-components-but-greater all satisfy")
 check(!SemVer.isAtLeast("0.2.9", "0.3.0") && !SemVer.isAtLeast("0.3.0", "0.3.1"), "semver: older app fails the minimum")
 check(SemVer.isAtLeast("0.1.0", nil) && SemVer.isAtLeast("0.1.0", ""), "semver: nil/blank minimum always satisfied")
+
+// --- "Update available" indicator: strict-newer compare, tag parse, decision (all network-free) ---
+// SemVer.isNewer is the strict ">" the "update available = latest > installed" decision needs.
+check(SemVer.isNewer("0.4.0", than: "0.3.0") && !SemVer.isNewer("0.3.0", than: "0.4.0"),
+      "semver newer: 0.4.0 > 0.3.0, not the reverse")
+check(!SemVer.isNewer("0.3.0", than: "0.3.0"), "semver newer: equal is NOT strictly newer")
+check(SemVer.isNewer("1.0", than: "0.9.9") && !SemVer.isNewer("0.9.9", than: "1.0"),
+      "semver newer: multi-segment 1.0 > 0.9.9 (pads missing component with 0)")
+check(SemVer.isNewer("0.4.0", than: nil) && SemVer.isNewer("0.4.0", than: ""),
+      "semver newer: any version beats a nil/blank baseline")
+check(!SemVer.isNewer("nightly", than: "0.3.0") && !SemVer.isNewer("0.3.0", than: "0.3.0"),
+      "semver newer: a non-numeric tag (→0.0.0) is never newer; handled without crashing")
+
+// Tag parse: a leading v/V is stripped; a bare version passes through; junk is handled (not a crash).
+check(ReleaseFeed.normalizeTag("v0.4.0") == "0.4.0" && ReleaseFeed.normalizeTag("0.4.0") == "0.4.0",
+      "tag parse: 'v0.4.0' and '0.4.0' both normalise to '0.4.0'")
+check(ReleaseFeed.normalizeTag("V1.2.3") == "1.2.3" && ReleaseFeed.normalizeTag("  v0.5.0  ") == "0.5.0",
+      "tag parse: leading V + surrounding whitespace trimmed")
+check(ReleaseFeed.normalizeTag("") == nil && ReleaseFeed.normalizeTag("   ") == nil,
+      "tag parse: empty / whitespace-only tag → nil")
+check(ReleaseFeed.normalizeTag("nightly") == "nightly", "tag parse: a junk tag survives (compares as 0.0.0 downstream)")
+check(ReleaseFeed.parseLatestTag(Data(#"{"tag_name":"v0.4.0","name":"Release"}"#.utf8)) == "0.4.0",
+      "tag parse: GitHub releases/latest JSON → 'v0.4.0' → '0.4.0'")
+check(ReleaseFeed.parseLatestTag(Data(#"{"tag_name":""}"#.utf8)) == nil, "tag parse: empty tag_name → nil")
+check(ReleaseFeed.parseLatestTag(Data(#"{"no_tag":"x"}"#.utf8)) == nil, "tag parse: missing tag_name → nil")
+check(ReleaseFeed.parseLatestTag(Data("not json".utf8)) == nil, "tag parse: non-JSON → nil (no crash)")
+check(ReleaseFeed.parseLatestTag(Data("[]".utf8)) == nil, "tag parse: JSON that isn't an object → nil")
+
+// Update decision: available when latest>installed; quiet when equal/older/offline; respects dismissal.
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.4.0", dismissed: nil) == .available(version: "0.4.0"),
+      "update decide: newer latest → .available")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.3.0", dismissed: nil) == .upToDate,
+      "update decide: equal latest → .upToDate")
+check(UpdateAvailability.decide(installed: "0.4.0", latest: "0.3.0", dismissed: nil) == .upToDate,
+      "update decide: older latest → .upToDate")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: nil, dismissed: nil) == .upToDate,
+      "update decide: nil latest (offline / parse miss) → .upToDate")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.4.0", dismissed: "0.4.0") == .upToDate,
+      "update decide: dismissed == latest → suppressed (don't nag)")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.5.0", dismissed: "0.4.0") == .available(version: "0.5.0"),
+      "update decide: a release strictly newer than the dismissed one reappears")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.4.0", dismissed: nil).offeredVersion == "0.4.0"
+      && UpdateAvailability.decide(installed: "0.3.0", latest: "0.3.0", dismissed: nil).offeredVersion == nil,
+      "update decide: offeredVersion mirrors .available / .upToDate")
+
 check(ColorRefSyntax.isHex("#E52521") && ColorRefSyntax.isHex("#E52521FF"), "colour: 6- and 8-digit hex valid")
 check(!ColorRefSyntax.isHex("#E525") && !ColorRefSyntax.isHex("#GGGGGG") && !ColorRefSyntax.isHex("E52521"),
       "colour: wrong-length / non-hex / missing-hash rejected")

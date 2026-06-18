@@ -40,6 +40,12 @@ final class AppController: NSObject {
     private var themeCatalog: ThemeCatalog?
     private var downloadingThemeIDs: Set<String> = []
 
+    // "Update available": the result of the once-a-day GitHub Releases check (see UpdateCheck). Drives a
+    // dismissible menu item + a subtle menu-bar cue. `.upToDate` until a successful fetch of a
+    // strictly-newer, undismissed release; dismissing persists the version so it stays quiet until
+    // something newer ships. Network-optional — offline/rate-limited just leaves this `.upToDate`.
+    private var updateAvailable: UpdateAvailability = .upToDate
+
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
     private let activeWindow: TimeInterval = 1800  // a session touched within 30 min is "active"
@@ -73,6 +79,18 @@ final class AppController: NSObject {
         timer = t
         maybeOfferEventDrivenSetup()
         fetchThemeCatalog()
+        checkForUpdate()
+    }
+
+    /// Kick off the throttled (≤ once/day) GitHub Releases check in the background; on a strictly-newer,
+    /// undismissed release, store it and rebuild the menu so the indicator appears. Best-effort and
+    /// silent on any failure — see UpdateCheck. Never blocks the main thread on the network.
+    private func checkForUpdate() {
+        UpdateCheck.checkIfDue { [weak self] availability in
+            guard let self = self else { return }
+            self.updateAvailable = availability
+            self.refresh()
+        }
     }
 
     /// Fetch the hosted theme catalog once in the background; cache it and rebuild the menu so the
@@ -107,6 +125,23 @@ final class AppController: NSObject {
             for s in sessions { menu.addItem(infoItem(rowText(for: s))) }
         }
         menu.addItem(.separator())
+        // "Update available" indicator: only present when the daily check found a strictly-newer,
+        // undismissed release. A submenu carries the one-click action + a Dismiss that persists the
+        // version so it stays quiet until something newer ships. Placed near the top so it's seen, but
+        // it's absent (not greyed) when up to date — "don't nag".
+        if let newVersion = updateAvailable.offeredVersion {
+            let updateItem = NSMenuItem(title: "Update available — v\(newVersion)", action: nil, keyEquivalent: "")
+            let updateMenu = NSMenu()
+            let get = NSMenuItem(title: "Get update…", action: #selector(openUpdate), keyEquivalent: "")
+            get.target = self; get.isEnabled = true
+            updateMenu.addItem(get)
+            let dismiss = NSMenuItem(title: "Dismiss this version", action: #selector(dismissUpdate), keyEquivalent: "")
+            dismiss.target = self; dismiss.isEnabled = true; dismiss.representedObject = newVersion
+            updateMenu.addItem(dismiss)
+            updateItem.submenu = updateMenu
+            menu.addItem(updateItem)
+            menu.addItem(.separator())
+        }
         let toggle = NSMenuItem(title: "Show floating island", action: #selector(toggleIsland), keyEquivalent: "")
         toggle.target = self; toggle.isEnabled = true; toggle.state = islandEnabled ? .on : .off
         menu.addItem(toggle)
@@ -195,9 +230,13 @@ final class AppController: NSObject {
         updateSleepAssertion(on: UserDefaults.standard.bool(forKey: keepAwakeKey), working: working)
         let glyph: String
         let glyphColor: NSColor
+        // A subtle update cue rides only on the idle glyph (○⋯) — the urgent waiting/working states keep
+        // their uncluttered count, so the update hint never competes with "an agent needs you". The menu
+        // item is the real affordance; this is just a quiet "there's something in the menu".
+        let updateCue = updateAvailable.offeredVersion != nil
         if waiting > 0 { glyph = "● \(waiting)"; glyphColor = .systemRed }
         else if working { glyph = "◐"; glyphColor = .systemTeal }
-        else { glyph = "○"; glyphColor = .secondaryLabelColor }
+        else { glyph = updateCue ? "○⋯" : "○"; glyphColor = .secondaryLabelColor }
         if let button = statusItem.button {
             button.attributedTitle = NSAttributedString(
                 string: glyph,
@@ -337,6 +376,23 @@ final class AppController: NSObject {
                 self?.refresh()   // rebuild the menu either way (drop the spinner, show the new theme)
             }
         }
+    }
+
+    /// Act on the "update available" indicator. For now this opens the GitHub Releases page in the
+    /// browser. TODO(install-and-cli): once the self-updater ships, swap this to invoke the CLI
+    /// `update` (run the installed `agent-island update` so the user updates in place).
+    @objc private func openUpdate() {
+        guard let url = URL(string: UpdateCheck.releasesPageURL) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Dismiss the offered update: persist the version so the badge stays quiet until a strictly-newer
+    /// release ships (the pure `UpdateAvailability.decide` compares against this), then hide it now.
+    @objc private func dismissUpdate(_ sender: NSMenuItem) {
+        guard let version = sender.representedObject as? String else { return }
+        UpdateCheck.dismiss(version: version)
+        updateAvailable = .upToDate
+        refresh()
     }
 
     @objc private func toggleSound() {
