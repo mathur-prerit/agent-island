@@ -2,6 +2,7 @@ import Foundation
 import AgentIslandCLICore
 import AgentIslandThemes
 import PersonaKit
+import HookInstall   // HomeDir (shared $HOME resolver)
 
 // The effectful half of `theme list / add / set`. `add` does ONLY the network GET here and hands the
 // bytes to the SHARED `ThemeInstaller.installFromLocalZip` — the security-critical verify / zip

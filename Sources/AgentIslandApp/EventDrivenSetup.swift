@@ -8,8 +8,10 @@ import HookInstall
 enum EventDrivenSetup {
     static let events = ["UserPromptSubmit", "Stop", "PostToolUse", "SubagentStart", "SubagentStop",
                          "PermissionRequest", "SessionStart", "SessionEnd"]
-    static let settingsPath = ("~/.claude/settings.json" as NSString).expandingTildeInPath
-    static let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
+    // Shared HomeDir (honors $HOME, validated) so the app, the hook bridge, and the management CLI all
+    // resolve ~/.claude / ~/.agent-island identically (not NSHomeDirectory via expandingTildeInPath).
+    static let settingsPath = HomeDir.path + "/.claude/settings.json"
+    static let statePath = HomeDir.path + "/.agent-island/state.json"
 
     private static func binDir() -> String {
         let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]

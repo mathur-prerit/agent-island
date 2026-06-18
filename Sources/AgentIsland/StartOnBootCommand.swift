@@ -1,5 +1,6 @@
 import Foundation
 import AgentIslandCLICore
+import HookInstall   // HomeDir (shared $HOME resolver)
 
 // `agentisland start-on-boot [on|off|status]`. Drives the `SMAppService` login item via `LoginItem`.
 // `status` is read-only (the default for a bare invocation, so the command never silently toggles).
