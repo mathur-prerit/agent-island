@@ -25,6 +25,10 @@ final class AppController: NSObject {
     private var sleepToken: NSObjectProtocol?
     private let keepAwakeKey = "islandKeepAwake"   // UserDefaults bool; default off
 
+    // Click-to-focus: the owning terminal's window identity per session (keyed by fullID), captured
+    // at SessionStart by the hook and carried in the daemon snapshot. Empty in polling mode.
+    private struct WindowIdentity { let termProgram: String?; let itermSessionID: String?; let bundleID: String? }
+    private var windowIdentities: [String: WindowIdentity] = [:]
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -44,6 +48,7 @@ final class AppController: NSObject {
         menu.autoenablesItems = false
         statusItem.menu = menu
         island.onDismiss = { [weak self] id in self?.dismissFinished(id) }
+        island.onFocus = { [weak self] id in self?.focusWindow(id) }
         refresh()
         // Create the timer UNSCHEDULED and register it only in .common mode.
         // `Timer.scheduledTimer` already registers the timer in .default mode; adding
@@ -362,7 +367,11 @@ final class AppController: NSObject {
 
     // MARK: - Sessions (daemon state if running, else poll transcripts)
 
-    private func activeSessions() -> [Session] { daemonSessions() ?? polledSessions() }
+    private func activeSessions() -> [Session] {
+        if let d = daemonSessions() { return d }
+        windowIdentities = [:]   // polling mode has no window identity → click-to-focus no-ops
+        return polledSessions()
+    }
 
     private func daemonSessions() -> [Session]? {
         let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
@@ -375,6 +384,15 @@ final class AppController: NSObject {
               Date().timeIntervalSince(mtime) < 30,
               let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
               let state = try? JSONDecoder().decode(DaemonState.self, from: data) else { return nil }
+        // Capture each session's window identity (for click-to-focus); set at SessionStart by the
+        // hook and persisted on the snapshot. Only daemon mode has it — polling clears the map.
+        windowIdentities = [:]
+        for snap in state.sessions
+        where snap.termProgram != nil || snap.itermSessionID != nil || snap.termBundleID != nil {
+            windowIdentities[snap.sessionID] = WindowIdentity(termProgram: snap.termProgram,
+                                                              itermSessionID: snap.itermSessionID,
+                                                              bundleID: snap.termBundleID)
+        }
         return state.sessions.map { snap in
             let short = String(snap.sessionID.prefix(8))
             // The daemon tracks state only; everything transcript-derived (tokens, title, start
@@ -482,6 +500,46 @@ final class AppController: NSObject {
     }
     private func verdict(_ s: AgentStatus) -> Verdict? {
         if case .finished(let v) = s { return v } else { return nil }
+    }
+
+    // MARK: - Click-to-focus (raise the owning terminal window)
+
+    /// Raise the terminal window/tab that owns this session. Identity is captured at SessionStart
+    /// (daemon mode only); polling-mode or unknown-host rows have no identity and no-op gracefully.
+    private func focusWindow(_ id: String) {
+        guard let ident = windowIdentities[id] else { return }
+        if ident.termProgram == "iTerm.app", let guid = itermGUID(from: ident.itermSessionID) {
+            focusITerm2(guid: guid)
+        } else if let bundle = ident.bundleID,
+                  let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
+    }
+
+    /// Select + activate an iTerm2 session by its GUID via AppleScript. First use prompts for
+    /// Automation (TCC) permission. Runs off the main thread; errors are swallowed (best-effort).
+    private func focusITerm2(guid: String) {
+        let script = """
+        tell application "iTerm2"
+          repeat with w in windows
+            repeat with t in tabs of w
+              repeat with s in sessions of t
+                if (id of s) is "\(guid)" then
+                  select w
+                  select t
+                  select s
+                  activate
+                  return
+                end if
+              end repeat
+            end repeat
+          end repeat
+        end tell
+        """
+        DispatchQueue.global(qos: .userInitiated).async {
+            var err: NSDictionary?
+            NSAppleScript(source: script)?.executeAndReturnError(&err)
+        }
     }
 
 }

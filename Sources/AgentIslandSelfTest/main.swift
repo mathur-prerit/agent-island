@@ -371,6 +371,47 @@ check(dig.tokens == 2769, "subagent digest: tokens summed (input+output)")
 check(dig.status == .waitingForInput(.stoppedTurn), "subagent digest: status derived from records")
 check(dig.durationSeconds.map { Int($0) } == 48, "subagent digest: duration = last-first = 48s")
 
+// --- Theme scene state mapping (RowStateMapper mirrors the old cue() precedence exactly) ---
+check(RowStateMapper.stateKey(isIdleRow: true, spinning: true, waitReason: .permission, verdict: .failed, dimmed: true) == .idle,
+      "stateKey: idle row wins over everything")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: true, waitReason: .permission, verdict: .failed, dimmed: true) == .working,
+      "stateKey: spinning -> working (outranks waiting/failed/finished)")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: .permission, verdict: .failed, dimmed: true) == .waiting(.permission),
+      "stateKey: waiting(permission) outranks failed/finished")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: .stoppedTurn, verdict: nil, dimmed: false) == .waiting(.stoppedTurn),
+      "stateKey: waiting(stoppedTurn)")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: .failed, dimmed: true) == .failed,
+      "stateKey: failed verdict outranks finished/dimmed")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: .success, dimmed: true) == .finished,
+      "stateKey: dimmed + success -> finished")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: nil, dimmed: true) == .finished,
+      "stateKey: dimmed (no verdict) -> finished")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: nil, dimmed: false) == .idle,
+      "stateKey: no signal -> idle fallback")
+check(RowSnapshot(id: "a", tokens: 5, state: .working) == RowSnapshot(id: "a", tokens: 5, state: .working),
+      "RowSnapshot is Equatable")
+
+// --- Click-to-focus: iTerm2 GUID extraction + window-identity persistence ---
+check(itermGUID(from: "w2t0p0:E6101BA4-C887-4433-9901-DD2126E04CC7") == "E6101BA4-C887-4433-9901-DD2126E04CC7",
+      "itermGUID: extracts GUID after the colon")
+check(itermGUID(from: "no-colon") == nil, "itermGUID: nil when no colon")
+check(itermGUID(from: "trailing:") == nil, "itermGUID: nil on empty suffix")
+check(itermGUID(from: nil) == nil, "itermGUID: nil input -> nil")
+let focusStore = StateStore()
+let focusT0 = Date(timeIntervalSince1970: 1_700_000_000)
+focusStore.apply(eventType: "SessionStart", sessionID: "S1", cwd: "/x/proj",
+                 termProgram: "iTerm.app", itermSessionID: "w0t0p0:GUID1", termBundleID: "com.googlecode.iterm2", at: focusT0)
+let fSnap1 = focusStore.snapshot(now: focusT0).sessions.first { $0.sessionID == "S1" }
+check(fSnap1?.itermSessionID == "w0t0p0:GUID1" && fSnap1?.termProgram == "iTerm.app",
+      "store: SessionStart persists window identity")
+focusStore.apply(eventType: "Stop", sessionID: "S1", at: focusT0.addingTimeInterval(1))
+let fSnap2 = focusStore.snapshot(now: focusT0.addingTimeInterval(1)).sessions.first { $0.sessionID == "S1" }
+check(fSnap2?.itermSessionID == "w0t0p0:GUID1", "store: identity-less event keeps prior identity")
+let legacyJSON = #"{"sessions":[{"sessionID":"old","state":"working","subActive":0,"subDone":0}]}"#
+let legacyDecoded = try? JSONDecoder().decode(DaemonState.self, from: Data(legacyJSON.utf8))
+check(legacyDecoded?.sessions.first?.sessionID == "old" && legacyDecoded?.sessions.first?.itermSessionID == nil,
+      "legacy state.json (no identity keys) decodes with identity nil")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")

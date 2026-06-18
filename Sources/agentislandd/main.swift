@@ -58,7 +58,13 @@ server.acceptLoop { payload in
     let eventType = (obj["hook_event_name"] as? String) ?? (obj["type"] as? String) ?? ""
     let sessionID = (obj["session_id"] as? String) ?? ""
     let cwd = obj["cwd"] as? String   // project dir → label
-    if store.apply(eventType: eventType, sessionID: sessionID, cwd: cwd) {
+    // Window identity injected by the hook relay (see AgentIslandHookCLI) for click-to-focus.
+    let termProgram = obj["island_term_program"] as? String
+    let itermSessionID = obj["island_iterm_session_id"] as? String
+    let termBundleID = obj["island_term_bundle_id"] as? String
+    if store.apply(eventType: eventType, sessionID: sessionID, cwd: cwd,
+                   termProgram: termProgram, itermSessionID: itermSessionID,
+                   termBundleID: termBundleID) {
         publishState()
     }
 }

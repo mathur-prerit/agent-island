@@ -16,9 +16,14 @@ public final class StateStore {
     public init() {}
 
     /// Apply a parsed hook event for a session. `cwd` (from the hook payload) sets the project
-    /// label; `at` is the event time (injectable for tests). Returns true if anything changed.
+    /// label; the `term*`/`iterm*` identity (from the hook's enriched payload) is stored for
+    /// click-to-focus. `at` is the event time (injectable for tests). Each identity field is
+    /// updated only when the incoming value is non-nil, so a later event that omits it doesn't
+    /// erase what an earlier event recorded. Returns true if anything changed.
     @discardableResult
-    public func apply(eventType: String, sessionID: String, cwd: String? = nil, at: Date = Date()) -> Bool {
+    public func apply(eventType: String, sessionID: String, cwd: String? = nil,
+                      termProgram: String? = nil, itermSessionID: String? = nil,
+                      termBundleID: String? = nil, at: Date = Date()) -> Bool {
         guard !sessionID.isEmpty else { return false }
         lock.lock(); defer { lock.unlock() }
         var snap = sessions[sessionID] ?? SessionSnapshot(sessionID: sessionID, state: "working")
@@ -28,6 +33,17 @@ public final class StateStore {
             if snap.cwd != cwd { snap.cwd = cwd; changed = true }
             let name = (cwd as NSString).lastPathComponent
             if !name.isEmpty, snap.label != name { snap.label = name; changed = true }
+        }
+
+        // Window identity — persist when present; never clear a known value with a missing one.
+        if let termProgram = termProgram, snap.termProgram != termProgram {
+            snap.termProgram = termProgram; changed = true
+        }
+        if let itermSessionID = itermSessionID, snap.itermSessionID != itermSessionID {
+            snap.itermSessionID = itermSessionID; changed = true
+        }
+        if let termBundleID = termBundleID, snap.termBundleID != termBundleID {
+            snap.termBundleID = termBundleID; changed = true
         }
 
         switch eventType {

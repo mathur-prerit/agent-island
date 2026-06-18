@@ -26,17 +26,35 @@ The same `Themes/<id>/` folder shape is used whether a data theme is **bundled**
 `Bundle.module`) or **downloaded** to `~/.agent-island/themes/<id>/` (read at runtime). Code themes
 stay first in the registry, so the default theme is always `journey`.
 
-## Code-theme contract (`IslandTheme`, in `ThemeCore.swift`)
+## Code-theme contract (`IslandTheme` + `ThemeScene`, in `ThemeCore.swift`)
 
 ```
 id: String                              // stable, persisted; never rename
 displayName: String                     // menu label; cosmetic, safe to change
-showsPersonaGlyph: Bool                 // show the persona emoji beside the cue?
-animates(_ row) -> Bool                 // does the cue animate (run the shared ticker)?
-cue(for row, frame) -> Cue              // .text | .icon | .road — the indicator this frame
+showsPersonaGlyph: Bool                 // show the persona emoji beside the indicator?
+makeScene() -> ThemeScene               // fresh per-row indicator scene (owns its NSView(s))
 tint(for row) -> NSColor                // row background base tint (.clear = none)
 sound(for transition) -> URL?           // lifecycle clip, or nil (default) for silence
 ```
+
+The theme owns the indicator entirely through a **`ThemeScene`** — there's no shared `Cue` enum or
+fixed set of host subviews. A new code theme touches only its own file. One scene per row, rebuilt
+when the theme changes:
+
+```
+view: NSView                            // the active sub-view to place (or a container)
+prefersOwnRow: Bool                     // read AFTER apply(): wide banner row vs. inline beside title
+apply(_ snapshot: RowSnapshot)          // set static state (which sub-view, tokens, colours)
+tick(_ frame: Int)                      // advance the animation frame
+animates(_ snapshot) -> Bool            // does this state run the shared ticker?
+```
+
+`RowSnapshot` (id · tokens · `ThemeStateKey`) is AppKit-free and lives in `AgentIslandCore`. The
+host derives the state key from the row's primitive fields via `RowStateMapper.stateKey(...)` (the
+single source of state precedence: idle → working → waiting → failed → finished), so every theme
+speaks one canonical vocabulary instead of re-deriving precedence. The row view places `scene.view`
+in a wide banner row (when `prefersOwnRow`, e.g. the scrolling road) or inline beside the title
+(CLI labels/icons), re-parenting between two permanently-arranged slots.
 
 `SoundTransition` (in `AgentIslandCore/Transitions.swift`) is edge-triggered:
 `startedWorking` · `enteredWaiting(reason)` · `enteredFinished(verdict)`. The host diffs each
