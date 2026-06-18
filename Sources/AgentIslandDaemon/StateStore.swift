@@ -53,7 +53,12 @@ public final class StateStore {
             snap.subActive = max(0, snap.subActive - 1); snap.subDone += 1; changed = true
         default:
             if let status = EventRouter.status(forEventType: eventType) {
-                snap.state = status.stateToken; changed = true
+                // A straggler PostToolUse relay that raced past SessionEnd must not revive a
+                // terminal session; only a fresh lifecycle (SessionStart/UserPromptSubmit) does.
+                let terminal = snap.state == "done" || snap.state == "failed"
+                if !(terminal && eventType == "PostToolUse") {
+                    snap.state = status.stateToken; changed = true
+                }
             }
         }
 

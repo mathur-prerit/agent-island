@@ -345,7 +345,13 @@ final class AppController: NSObject {
         // re-offers, so a transient install failure (e.g. a momentarily-malformed
         // settings.json the user later repairs) doesn't permanently suppress the prompt.
         switch defaults.string(forKey: eventModeKey) {
-        case "enabled": EventDrivenSetup.ensureDaemonRunning(); return
+        case "enabled":
+            // Self-heal the hook set: an app upgrade may add events (e.g. PostToolUse) that an
+            // already-"enabled" install predates. Re-installing is idempotent and writes only when
+            // something actually changed, so this is a no-op once the set is in sync.
+            try? EventDrivenSetup.installHooks()
+            EventDrivenSetup.ensureDaemonRunning()
+            return
         case "declined": return
         default: break  // nil or "error" → offer
         }
@@ -391,8 +397,32 @@ final class AppController: NSObject {
 
     private func activeSessions() -> [Session] {
         if let d = daemonSessions() { return d }
-        windowIdentities = [:]   // polling mode has no window identity → click-to-focus no-ops
+        // Daemon down/stale → polling. Window identity doesn't go stale the way *state* does (a
+        // terminal window doesn't move), so load it best-effort from state.json regardless of the
+        // freshness gate — click-to-focus keeps working as long as the session was ever seen.
+        loadWindowIdentitiesFromState()
         return polledSessions()
+    }
+
+    /// Populate `windowIdentities` from state.json WITHOUT the daemon-freshness gate. A terminal
+    /// window's identity is durable (it doesn't move), so even a stale state.json is a valid source;
+    /// this keeps click-to-focus alive when the daemon is down and the app falls back to polling.
+    /// Rebuilds the map fresh each call, bounding it to the sessions state.json currently knows.
+    private func loadWindowIdentitiesFromState() {
+        let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+              let state = try? JSONDecoder().decode(DaemonState.self, from: data) else {
+            windowIdentities = [:]   // no readable state file → nothing to focus
+            return
+        }
+        var map: [String: WindowIdentity] = [:]
+        for snap in state.sessions
+        where snap.termProgram != nil || snap.itermSessionID != nil || snap.termBundleID != nil {
+            map[snap.sessionID] = WindowIdentity(termProgram: snap.termProgram,
+                                                 itermSessionID: snap.itermSessionID,
+                                                 bundleID: snap.termBundleID)
+        }
+        windowIdentities = map
     }
 
     private func daemonSessions() -> [Session]? {
@@ -456,7 +486,10 @@ final class AppController: NSObject {
                 guard mtime >= cutoff else { continue }
                 let lines = readLines(p)
                 let records = TranscriptAdapter.parse(lines: lines)
-                let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false)
+                // mtime = last write to the transcript; lets deriveStatus tell a mid-turn text
+                // preamble (still working) from a turn that truly stopped (waiting).
+                let sessionStatus = StateEngine.deriveStatus(records: records, openPermission: false,
+                                                             lastActivity: mtime)
                 let digests = subagentDigests(forTranscript: p)
                 var rolled = Rollup.rollUp(session: sessionStatus, subAgents: digests.map(\.status))
                 // A session stopped (waiting) but quiet >10 min reads as idle, not "waiting on
@@ -490,7 +523,11 @@ final class AppController: NSObject {
         for case let rel as String in walker {
             let name = (rel as NSString).lastPathComponent
             guard name.hasPrefix("agent-"), name.hasSuffix(".jsonl") else { continue }
-            out.append(SubagentDigest.fromTranscript(lines: readLines("\(subDir)/\(rel)")))
+            let full = "\(subDir)/\(rel)"
+            // mtime lets a busy sub-agent's mid-turn text-tail read as working, not waiting (which
+            // Rollup would otherwise float up to the whole session).
+            let mtime = (try? fm.attributesOfItem(atPath: full))?[.modificationDate] as? Date
+            out.append(SubagentDigest.fromTranscript(lines: readLines(full), lastActivity: mtime))
         }
         return out
     }

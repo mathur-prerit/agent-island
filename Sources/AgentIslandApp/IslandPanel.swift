@@ -503,6 +503,21 @@ final class SessionRowView: NSView {
         if currentRow != nil { renderIndicator(frame: 0) }
     }
 
+    /// The panel is non-activating, so the first click while the app is inactive would otherwise be
+    /// swallowed just to activate — accept it so a single click focuses the owning window right away.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Route clicks anywhere on the row body to `mouseDown` (click-to-focus). The title/state
+    /// `NSTextField` labels and inner stack views are hit-testable and would swallow a click on the
+    /// obvious target (the title text) without bubbling it up. The disclosure/✕ controls keep their
+    /// own clicks when visible so they still toggle/dismiss.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }   // outside the row → don't claim
+        if !disclosure.isHidden, hit.isDescendant(of: disclosure) { return hit }
+        if !closeButton.isHidden, hit.isDescendant(of: closeButton) { return hit }
+        return self   // labels / slots / background → the row itself handles the click
+    }
+
     /// Clicking the row's background/title raises the owning terminal window (click-to-focus). The
     /// disclosure/✕ are `FirstMouseButton`s that consume their own clicks, so a `mouseDown` reaching
     /// the row view is a background/title hit. We don't call super (no window drag from a row body).

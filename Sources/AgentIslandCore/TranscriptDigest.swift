@@ -30,25 +30,32 @@ public enum TranscriptDigest {
     /// Single walk over `lines`, one `JSONSerialization` parse per line, all four rules applied to
     /// that one parsed object. Tolerant of unparseable lines exactly as the individual functions are.
     public static func scan(lines: [String]) -> Result {
-        var tokens = 0
+        var maxContext = 0
+        var outputByMessage: [String: Int] = [:]
         var title: String?
         var startedAt: Date?
         var steps = 0
 
-        for line in lines {
+        for (index, line) in lines.enumerated() {
             // SINGLE parse per line. Unparseable / non-object lines are skipped entirely — every
             // individual function below also bails on exactly this guard, so skipping here is safe.
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
 
+            let message = obj["message"] as? [String: Any]
+
             // --- Rule 1: tokens (mirrors TokenUsage.freshTokens) ---
-            // usage at top level OR nested under message.usage; sum input+output (cache excluded).
-            if let u = (obj["usage"] as? [String: Any])
-                ?? ((obj["message"] as? [String: Any])?["usage"] as? [String: Any]) {
+            // usage at top level OR nested under message.usage. The figure is the PEAK request
+            // context (input + cache_read + cache_creation) plus output deduped by message.id —
+            // see TokenUsage.freshTokens for why summing input+output per record over-counts.
+            if let u = (obj["usage"] as? [String: Any]) ?? (message?["usage"] as? [String: Any]) {
                 let input = (u["input_tokens"] as? Int) ?? 0
-                let output = (u["output_tokens"] as? Int) ?? 0
-                tokens += input + output
+                let cacheRead = (u["cache_read_input_tokens"] as? Int) ?? 0
+                let cacheCreate = (u["cache_creation_input_tokens"] as? Int) ?? 0
+                maxContext = max(maxContext, input + cacheRead + cacheCreate)
+                let key = (message?["id"] as? String) ?? "•line\(index)"
+                outputByMessage[key] = max(outputByMessage[key] ?? 0, (u["output_tokens"] as? Int) ?? 0)
             }
 
             let type = obj["type"] as? String
@@ -73,14 +80,14 @@ public enum TranscriptDigest {
             //     record type is "assistant" AND message.content is an array of objects; each block's
             //     "type" is read, and tool_use blocks are counted. ---
             if type == "assistant",
-               let message = obj["message"] as? [String: Any],
-               let content = message["content"] as? [[String: Any]] {
+               let content = message?["content"] as? [[String: Any]] {
                 for block in content where (block["type"] as? String) == "tool_use" {
                     steps += 1
                 }
             }
         }
 
+        let tokens = maxContext + outputByMessage.values.reduce(0, +)
         return Result(tokens: tokens, title: title, startedAt: startedAt, steps: steps)
     }
 }

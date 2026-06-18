@@ -17,10 +17,14 @@ public struct SubagentDigest: Equatable, Sendable {
         self.durationSeconds = durationSeconds
     }
 
-    /// Parse one sub-agent transcript into a digest.
-    public static func fromTranscript(lines: [String]) -> SubagentDigest {
+    /// Parse one sub-agent transcript into a digest. `lastActivity` (the transcript's mtime, when the
+    /// caller has it) lets a mid-turn text-tail read as WORKING rather than waiting — same recency
+    /// disambiguation the top-level session status uses, so a busy sub-agent doesn't roll its parent
+    /// up to "waiting" (see `Rollup`).
+    public static func fromTranscript(lines: [String], lastActivity: Date? = nil) -> SubagentDigest {
         let records = TranscriptAdapter.parse(lines: lines)
-        let status = StateEngine.deriveStatus(records: records, openPermission: false)
+        let status = StateEngine.deriveStatus(records: records, openPermission: false,
+                                              lastActivity: lastActivity)
         let tokens = TokenUsage.freshTokens(lines: lines)
         let name = TranscriptAdapter.firstUserText(lines: lines)
             .map { TaskLineSanitizer.sanitize($0, maxLength: 38) }

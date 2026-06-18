@@ -24,6 +24,18 @@ check(StateEngine.deriveStatus(records: recs([("user", []), ("assistant", ["thin
 check(StateEngine.deriveStatus(records: recs([("assistant", ["thinking", "text"])]), openPermission: false) == .waitingForInput(.stoppedTurn), "stopped assistant text -> waiting")
 check(StateEngine.deriveStatus(records: recs([("assistant", ["text"]), ("user", [])]), openPermission: false) == .working, "user last -> working")
 check(StateEngine.deriveStatus(records: recs([("assistant", ["text", "tool_use"])]), openPermission: true) == .waitingForInput(.permission), "open permission -> waiting(permission)")
+// Recency disambiguation: a text-tail (stopped turn) touched within the window is a mid-turn
+// preamble before the next tool call -> WORKING; quiet past the window -> truly waiting.
+let recencyBase = Date(timeIntervalSince1970: 1_700_000_000)
+let textTail = recs([("user", []), ("assistant", ["thinking", "text"])])
+check(StateEngine.deriveStatus(records: textTail, openPermission: false,
+        lastActivity: recencyBase, now: recencyBase.addingTimeInterval(3)) == .working,
+      "recent text-tail (within window) -> working (mid-turn, not waiting)")
+check(StateEngine.deriveStatus(records: textTail, openPermission: false,
+        lastActivity: recencyBase, now: recencyBase.addingTimeInterval(120)) == .waitingForInput(.stoppedTurn),
+      "stale text-tail (past window) -> waiting")
+check(StateEngine.deriveStatus(records: textTail, openPermission: false) == .waitingForInput(.stoppedTurn),
+      "text-tail with no recency info -> waiting (original behavior preserved)")
 check(StateEngine.deriveStatus(records: [], openPermission: false) == .working, "empty transcript -> working")
 
 // --- Parsing ---
@@ -184,6 +196,20 @@ _ = try? SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook 
 check(parsedHookCount(settingsTestPath, event: "Stop", command: "/x/hook relay") == 1, "re-install is idempotent (command appears once)")
 let bakAfterReinstall = (try? String(contentsOfFile: settingsTestPath + ".bak", encoding: .utf8)) ?? ""
 check(bakAfterReinstall.contains("otherKey") && !bakAfterReinstall.contains("hooks"), "re-install preserves the pristine .bak (original config, no hooks)")
+// Self-heal on upgrade: re-installing with an extra event adds only the new hook (keeps the rest).
+_ = try? SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop", "PostToolUse"])
+check(parsedHookCount(settingsTestPath, event: "PostToolUse", command: "/x/hook relay") == 1
+      && parsedHookCount(settingsTestPath, event: "Stop", command: "/x/hook relay") == 1,
+      "install with a newly-added event self-heals (adds PostToolUse, keeps Stop once)")
+// Semantic no-op: a fully-hooked but non-canonically-formatted file is left byte-untouched on
+// re-install (so the self-healing launch re-install doesn't reformat a user's hand-edited file).
+if let obj = try? JSONSerialization.jsonObject(with: (try? Data(contentsOf: URL(fileURLWithPath: settingsTestPath))) ?? Data()),
+   let compact = try? JSONSerialization.data(withJSONObject: obj) {   // compact = non-canonical formatting
+    try? compact.write(to: URL(fileURLWithPath: settingsTestPath))
+    _ = try? SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop", "PostToolUse"])
+    let after = (try? Data(contentsOf: URL(fileURLWithPath: settingsTestPath))) ?? Data()
+    check(after == compact, "re-install leaves a fully-hooked non-canonical file untouched (semantic no-op, no reformat)")
+}
 try? Data("not json".utf8).write(to: URL(fileURLWithPath: settingsTestPath))
 var installAborted = false
 do { try SettingsFile.install(settingsPath: settingsTestPath, command: "/x/hook relay", events: ["Stop"]) } catch { installAborted = true }
@@ -194,6 +220,7 @@ try? FileManager.default.removeItem(atPath: tmpDir)
 // --- Daemon event routing + state store (event-driven path) ---
 check(EventRouter.status(forEventType: "UserPromptSubmit") == .working, "UserPromptSubmit -> working")
 check(EventRouter.status(forEventType: "Stop") == .waitingForInput(.stoppedTurn), "Stop -> waiting (stopped turn)")
+check(EventRouter.status(forEventType: "PostToolUse") == .working, "PostToolUse -> working (re-arms a mid-loop Stop)")
 check(EventRouter.status(forEventType: "PermissionRequest") == .waitingForInput(.permission), "PermissionRequest -> waiting (permission)")
 check(EventRouter.status(forEventType: "SessionEnd") == .finished(.unknown), "SessionEnd -> finished")
 check(EventRouter.status(forEventType: "SubagentStart") == nil, "SubagentStart -> sub-agent tracking, not session state")
@@ -202,6 +229,14 @@ daemonStore.apply(eventType: "UserPromptSubmit", sessionID: "s1")
 check(daemonStore.snapshot().sessions.first?.state == "working", "store: UserPromptSubmit -> working")
 daemonStore.apply(eventType: "Stop", sessionID: "s1")
 check(daemonStore.snapshot().sessions.first?.state == "waiting", "store: Stop -> waiting")
+daemonStore.apply(eventType: "PostToolUse", sessionID: "s1")
+check(daemonStore.snapshot().sessions.first?.state == "working", "store: PostToolUse re-arms working after a mid-loop Stop")
+// A terminal session must NOT be revived by a straggler PostToolUse that raced past SessionEnd.
+let endStore = StateStore()
+endStore.apply(eventType: "SessionEnd", sessionID: "e1")
+endStore.apply(eventType: "PostToolUse", sessionID: "e1")
+check(endStore.snapshot().sessions.first?.state == "done", "store: PostToolUse does not revive a SessionEnd'd session")
+daemonStore.apply(eventType: "Stop", sessionID: "s1")   // restore waiting for the sub-agent count checks below
 daemonStore.apply(eventType: "SubagentStart", sessionID: "s1")
 daemonStore.apply(eventType: "SubagentStart", sessionID: "s1")
 daemonStore.apply(eventType: "SubagentStop", sessionID: "s1")
@@ -300,8 +335,27 @@ let usageLines = [
     "garbage{",
     #"{"type":"assistant","usage":{"input_tokens":10,"output_tokens":5}}"#,
 ]
-check(TokenUsage.freshTokens(lines: usageLines) == 165, "freshTokens sums input+output across both usage shapes, ignoring cache")
+check(TokenUsage.freshTokens(lines: usageLines) == 10154,
+      "freshTokens = peak context (max input+cache_read+cache_creation = 100+9999) + output deduped per message (50+5)")
 check(TokenUsage.freshTokens(lines: []) == 0, "freshTokens empty -> 0")
+
+// Token meter must (a) count one message's streamed-block records ONCE (dedup by message.id),
+// (b) include the cache fields where the real context lives, and (c) take PEAK context — a later
+// compaction/summary record with smaller context must not lower the figure.
+let tokenMeterLines = [
+    // message m1 streamed across 3 records — all carry the SAME usage; output must count once.
+    #"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1000}}}"#,
+    #"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1000}}}"#,
+    #"{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":5,"output_tokens":200,"cache_read_input_tokens":40000,"cache_creation_input_tokens":1000}}}"#,
+    // message m2 — a later, larger request: this is the peak context (60007).
+    #"{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":7,"output_tokens":300,"cache_read_input_tokens":60000}}}"#,
+    // trailing summary/compaction record with tiny context — must NOT lower the peak.
+    #"{"type":"assistant","message":{"id":"m3","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+]
+check(TokenUsage.freshTokens(lines: tokenMeterLines) == 60507,
+      "token meter: peak context 60007 (m2) + deduped output 500 (m1 200 once + m2 300 + m3 0); streamed dupes counted once, compaction record doesn't shrink it")
+check(TranscriptDigest.scan(lines: tokenMeterLines).tokens == TokenUsage.freshTokens(lines: tokenMeterLines),
+      "scan.tokens mirrors freshTokens on the dedup/peak fixture")
 check(TokenUsage.compact(999) == "999", "compact < 1000 is raw")
 check(TokenUsage.compact(1500) == "1.5k", "compact thousands one-decimal")
 check(TokenUsage.compact(146_000) == "146k", "compact tens-of-thousands integer k")
@@ -367,8 +421,12 @@ let subLines = [
 ]
 let dig = SubagentDigest.fromTranscript(lines: subLines)
 check(dig.name.count == 38 && dig.name.hasPrefix("Survey the Swift package") && dig.name.hasSuffix("…"), "subagent digest: name = sanitized first prompt, truncated")
-check(dig.tokens == 2769, "subagent digest: tokens summed (input+output)")
+check(dig.tokens == 2769, "subagent digest: tokens = context (2000) + output (769)")
 check(dig.status == .waitingForInput(.stoppedTurn), "subagent digest: status derived from records")
+// A busy sub-agent (fresh transcript, mid-turn text-tail) must read as WORKING, not waiting — else
+// Rollup floats it up and the whole session shows "waiting" while actively working (bug #11 path).
+let busySub = SubagentDigest.fromTranscript(lines: subLines, lastActivity: Date())
+check(busySub.status == .working, "subagent digest: fresh text-tail -> working (recency, doesn't roll session to waiting)")
 check(dig.durationSeconds.map { Int($0) } == 48, "subagent digest: duration = last-first = 48s")
 
 // --- Theme scene state mapping (RowStateMapper mirrors the old cue() precedence exactly) ---
@@ -411,6 +469,12 @@ let legacyJSON = #"{"sessions":[{"sessionID":"old","state":"working","subActive"
 let legacyDecoded = try? JSONDecoder().decode(DaemonState.self, from: Data(legacyJSON.utf8))
 check(legacyDecoded?.sessions.first?.sessionID == "old" && legacyDecoded?.sessions.first?.itermSessionID == nil,
       "legacy state.json (no identity keys) decodes with identity nil")
+// Click-to-focus loads identity from state.json regardless of freshness — verify an identity-bearing
+// snapshot decodes intact (the durable source the app reads when the daemon is down and it polls).
+let identityJSON = #"{"sessions":[{"sessionID":"s","state":"waiting","subActive":0,"subDone":0,"termProgram":"iTerm.app","itermSessionID":"w0t0p0:GUID","termBundleID":"com.googlecode.iterm2"}]}"#
+let identitySnap = (try? JSONDecoder().decode(DaemonState.self, from: Data(identityJSON.utf8)))?.sessions.first
+check(identitySnap?.termProgram == "iTerm.app" && identitySnap?.itermSessionID == "w0t0p0:GUID" && identitySnap?.termBundleID == "com.googlecode.iterm2",
+      "state.json with window identity decodes intact (freshness-independent click-to-focus source)")
 
 // --- TranscriptDigest: ONE-PASS scan must be byte-identical to the individual functions ---
 let digestLines = [
@@ -429,7 +493,7 @@ check(scanned.title == ConversationTitle.fromTranscript(lines: digestLines), "sc
 check(scanned.startedAt == TranscriptClock.startedAt(lines: digestLines), "scan.startedAt == startedAt")
 let digestSteps = TranscriptAdapter.parse(lines: digestLines).reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
 check(scanned.steps == digestSteps, "scan.steps == TranscriptAdapter tool_use count")
-check(scanned.tokens == 165, "scan: tokens 165 (100+50 + 10+5, cache excluded)")
+check(scanned.tokens == 164, "scan: tokens 164 (peak context 100+9 + output 50+5; cache included, output deduped)")
 check(scanned.title == "Refined title", "scan: last non-empty ai-title wins")
 check(scanned.startedAt != nil, "scan: startedAt = first timestamp")
 check(scanned.steps == 2, "scan: 2 tool_use steps")
