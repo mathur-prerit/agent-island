@@ -271,6 +271,12 @@ final class AppController: NSObject, NSMenuDelegate {
         reset.target = self; reset.isEnabled = true
         menu.addItem(reset)
 
+        // Version footer (dim, disabled). Shows the installed version; appends "→ vX update" when the
+        // daily check found a newer release, so the version line doubles as a subtle update hint.
+        let versionText = updateAvailable.offeredVersion.map { "agent-island v\(AppInfo.version)  →  v\($0) available" }
+            ?? "agent-island v\(AppInfo.version)"
+        menu.addItem(infoItem(versionText))
+
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit agent-island", action: #selector(quit), keyEquivalent: "q")
         quit.target = self; quit.isEnabled = true
