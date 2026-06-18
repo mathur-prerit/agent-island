@@ -6,7 +6,7 @@ import HookInstall
 /// running app's executable directory (works for `swift run` and the bundled .app). If they
 /// can't be found, every entry point no-ops so the app simply stays on polling.
 enum EventDrivenSetup {
-    static let events = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
+    static let events = ["UserPromptSubmit", "Stop", "PostToolUse", "SubagentStart", "SubagentStop",
                          "PermissionRequest", "SessionStart", "SessionEnd"]
     static let settingsPath = ("~/.claude/settings.json" as NSString).expandingTildeInPath
     static let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath

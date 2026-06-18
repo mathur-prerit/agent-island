@@ -13,7 +13,7 @@ import AgentIslandDaemon
 
 let socketPath = ("~/.agent-island/agentisland.sock" as NSString).expandingTildeInPath
 let settingsPath = ("~/.claude/settings.json" as NSString).expandingTildeInPath
-let events = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop",
+let events = ["UserPromptSubmit", "Stop", "PostToolUse", "SubagentStart", "SubagentStop",
               "PermissionRequest", "SessionStart", "SessionEnd"]
 
 func stderrPrint(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8)) }

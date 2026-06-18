@@ -18,6 +18,18 @@ public enum SettingsFile {
         case .failure(.invalidJSON):
             throw FileError.invalidExistingJSON  // do NOT overwrite a file we couldn't parse
         case .success(let merged):
+            // Idempotent no-op: skip the write when the file already references our hook for every
+            // event. Compare SEMANTICALLY — canonicalize the existing bytes and compare to `merged`
+            // — so a user's hand-edited settings.json isn't reformatted (whitespace/key-order) on
+            // every launch by the self-healing re-install. Only a genuine change (a newly-added
+            // event) differs from the canonicalized existing and triggers a write.
+            if exists,
+               let existingObj = try? JSONSerialization.jsonObject(with: existing),
+               let canonicalExisting = try? JSONSerialization.data(
+                   withJSONObject: existingObj, options: [.prettyPrinted, .sortedKeys]),
+               canonicalExisting == merged {
+                return
+            }
             // Back up only the FIRST time (when no .bak exists yet), so a re-install doesn't
             // overwrite the user's pristine config with an already-hooked version.
             let backupPath = settingsPath + ".bak"
