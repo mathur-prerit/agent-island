@@ -1,8 +1,8 @@
 name: Release
 
 # Build the prebuilt artifacts install.sh downloads, and attach them to the GitHub Release on a version
-# tag (v*). Two arches so both Apple Silicon and Intel get a native prebuilt; install.sh falls back to a
-# from-source build for any arch/platform without an asset.
+# tag (v*). Apple Silicon (arm64) only — install.sh falls back to a from-source build for any other
+# arch/platform (e.g. Intel) that has no prebuilt asset.
 on:
   push:
     tags: ['v*']
@@ -20,11 +20,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - { runner: macos-14, arch: arm64 }    # Apple Silicon
-          - { runner: macos-13, arch: x86_64 }   # Intel
+          - { runner: macos-14, arch: arm64 }    # Apple Silicon only (Intel falls back to install.sh's from-source build)
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve tag + version
         id: v
@@ -92,7 +91,7 @@ jobs:
       # (non-prerelease) release so install.sh's `releases/latest` resolves it (it falls back to the releases
       # list if not, but the one-liner is snappiest when /latest hits).
       - name: Attach to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.v.outputs.tag }}
           fail_on_unmatched_files: true
