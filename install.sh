@@ -129,6 +129,27 @@ maybe_start_on_boot() {
   esac
 }
 
+# Ask which look (animation theme) to use. Interactive only — a piped `curl | sh` keeps the default
+# (Road Runner). The three offered themes ship with the app (built-in + bundled); more can be downloaded
+# any time via `agentisland theme add` or the menu-bar ▸ Animation theme ▸ Download more.
+maybe_pick_theme() {
+  [ -t 0 ] || return 0
+  command -v agentisland >/dev/null 2>&1 || return 0   # need the CLI on PATH to set the preference
+  printf '\nPick a look (animation theme) — change it any time:\n'
+  printf '  1) Road Runner   — a token-burn road trip   (default)\n'
+  printf '  2) Minimal       — a clean CLI-style spinner\n'
+  printf '  3) Pixel Critter — a bouncy pixel sprite\n'
+  printf 'Choice [1-3, Enter=1]: '
+  read -r theme_choice || theme_choice=""
+  case "$theme_choice" in
+    2) agentisland theme set minimal >/dev/null 2>&1 && log "Theme set to Minimal." ;;
+    3) agentisland theme set critter >/dev/null 2>&1 && log "Theme set to Pixel Critter." ;;
+    *) agentisland theme set journey >/dev/null 2>&1 && log "Theme set to Road Runner." ;;
+  esac
+  log "Want more looks? Install themes any time:  agentisland theme add <id|url>"
+  log "  …or pick from the menu-bar ▸ Animation theme ▸ Download more."
+}
+
 # --- Release (prebuilt) install path -----------------------------------------
 # Returns 0 on a successful prebuilt install, 1 to signal "fall back to source".
 try_release_install() {
@@ -255,6 +276,7 @@ source_install() {
 if ! try_release_install; then
   source_install
 fi
+maybe_pick_theme
 maybe_start_on_boot
 
 log "Done. Launch it now with:  open \"${APP_DEST}\""
