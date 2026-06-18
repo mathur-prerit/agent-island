@@ -17,7 +17,7 @@ public enum Command: Equatable {
     case configGet(key: String)                 // `config get <key>`
     case configSet(key: String, value: String)  // `config set <key> <value>`
     case update                                 // `update`
-    case uninstall(yes: Bool, dryRun: Bool)     // `uninstall [--yes] [--dry-run]`
+    case uninstall(yes: Bool, dryRun: Bool, purge: Bool)  // `uninstall [--yes] [--dry-run] [--purge]`
     case startOnBoot(StartOnBootAction)         // `start-on-boot [on|off|status]`
     case unknown(String)                        // an unrecognized first token
     case usageError(String)                     // a recognized command with the wrong/missing args
@@ -92,14 +92,16 @@ public enum CommandParser {
     private static func parseUninstall(_ args: [String]) -> Command {
         var yes = false
         var dryRun = false
+        var purge = false
         for a in args {
             switch a {
             case "--yes", "-y": yes = true
             case "--dry-run", "-n": dryRun = true
-            default: return .usageError("unknown uninstall flag '\(a)' (try: --yes, --dry-run)")
+            case "--purge": purge = true
+            default: return .usageError("unknown uninstall flag '\(a)' (try: --yes, --dry-run, --purge)")
             }
         }
-        return .uninstall(yes: yes, dryRun: dryRun)
+        return .uninstall(yes: yes, dryRun: dryRun, purge: purge)
     }
 
     private static func parseStartOnBoot(_ args: [String]) -> Command {

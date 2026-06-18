@@ -121,8 +121,9 @@ The one-line installer puts an `agentisland` binary on your PATH (or build + run
 
 ```sh
 agentisland theme list                # installed + bundled + downloadable themes (* = active)
-agentisland theme add <id>            # download + install a theme by its catalog id
-agentisland theme add <https-url>     # …or install directly from an https zip url
+agentisland theme add <id>            # install a theme by its catalog id
+agentisland theme add <https-url>     # …or directly from an https zip url
+agentisland theme add ./my-theme      # …or a LOCAL folder you authored (or a .zip on disk)
 agentisland theme set <id>            # make <id> the active theme
 
 agentisland config                    # list the settable preferences + current values
@@ -138,10 +139,10 @@ agentisland version                   # print the CLI version
 Notes that keep it honest:
 
 - **`config`** reads and writes the **app's own preferences domain** (`com.mathur-prerit.agentisland`), so a `config set` is exactly what the running app reads — restart agent-island to pick up a change. Settable keys: `islandTheme`, `soundEnabled`, `soundCueSet` (`theme`|`default`), `islandKeepAwake`, and `eventDrivenSetupDecision` (`enabled`|`declined`|`error`). Unknown keys and off-allowlist values are refused.
-- **`theme add`** downloads over **https only** and runs the *same* validate-then-install pipeline the app's menu uses — integrity check → zip-bomb / zip-slip / symlink inspection → sandboxed extraction → strict manifest validation → atomic install. A bad archive is rejected with no partial install left behind. Catalog ids carry a published SHA-256/size; a raw `https` url is installed as-is (its bytes are its own integrity claim).
+- **`theme add`** accepts a catalog **id**, an **https** zip url, or a **local path** — your own theme folder, or a `.zip` on disk. All routes run the *same* validate-then-install pipeline the app's menu uses — integrity check → zip-bomb / zip-slip / symlink inspection → sandboxed extraction → strict manifest validation → atomic install into `~/.agent-island/themes/<id>/`. A local folder is zipped first and goes through the identical gates — nothing is bypassed. A bad archive is rejected with no partial install left behind.
 - **`update`** compares your installed version against the latest GitHub release; if newer, it offers to re-run the installer pinned to that release (downloading the prebuilt artifact, or building from source if none is available). No silent self-mutation.
 - **`start-on-boot`** uses macOS 13+ `SMAppService` to register the **app** as a login item (the daemon follows the app — there's no separate LaunchAgent). A bare `start-on-boot` just reports status. Because the CLI binary isn't itself the app bundle, on/off also print the manual fallback (System Settings ▸ General ▸ Login Items) in case the automatic toggle doesn't take. *(The app's menu-bar ▸ **Launch at login** toggle does this directly from inside the bundle — the most reliable path.)*
-- **`uninstall`** reverses the hooks (preserving any non-agent-island hooks and your other settings), unregisters the login item, and removes `~/.agent-island` and the `.app`. It **confirms first** (skip with `--yes`); `--dry-run` prints exactly what it would do and changes nothing.
+- **`uninstall`** reverses the hooks (preserving any non-agent-island hooks and your other settings), unregisters the login item, removes the `.app`, and clears `~/.agent-island` — but **keeps your custom themes** in `~/.agent-island/themes/` by default, so they survive an uninstall/reinstall. Add **`--purge`** to wipe those too. It **confirms first** (skip with `--yes`); `--dry-run` prints exactly what it would do and changes nothing.
 
 > Prebuilt binaries ship via GitHub Releases (built + attached by CI on each `v*` tag; ad-hoc-signed, de-quarantined on install). They are **not** Developer-ID signed or notarized yet — a notarized release and a real Homebrew tap are future work.
 
@@ -202,12 +203,16 @@ swift run AgentIslandApp -renderTheme mytheme /tmp/mytheme.png
 cp -R mytheme ~/.agent-island/themes/mytheme
 ```
 
-Or install a packaged theme without copying by hand — zip the folder and use the CLI (same validated, sandboxed install the app's menu uses):
+Or let the CLI install it (same validated, sandboxed pipeline as the menu) — from a local folder, a local zip, or an https url:
 
 ```sh
-agentisland theme add https://example.com/mytheme.zip   # https only; integrity + zip-slip checked
+agentisland theme add ./mytheme                         # a LOCAL folder you authored
+agentisland theme add ./mytheme.zip                     # …or a local .zip
+agentisland theme add https://example.com/mytheme.zip   # …or an https url
 agentisland theme set mytheme
 ```
+
+Your custom local themes are **kept on `agentisland uninstall`** (they're only removed with `--purge`), so they survive an uninstall/reinstall.
 
 ### 4. Share it
 

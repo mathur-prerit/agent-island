@@ -8,8 +8,9 @@ import HookInstall
 // `SettingsFile.uninstall` (backup-aware, only removes our relay entries), and `--dry-run` performs
 // NOTHING (just prints the plan). Confirmation is required unless `--yes`.
 enum UninstallCommand {
-    static func run(yes: Bool, dryRun: Bool, paths: InstallPaths = InstallPaths(home: HomeDir.path)) -> Bool {
-        let actions = UninstallPlan.plan(paths)
+    static func run(yes: Bool, dryRun: Bool, purge: Bool = false,
+                    paths: InstallPaths = InstallPaths(home: HomeDir.path)) -> Bool {
+        let actions = UninstallPlan.plan(paths, purge: purge)
 
         out("This will:")
         for a in actions { out("  - \(a.describe)") }
@@ -55,7 +56,28 @@ enum UninstallCommand {
             return removePath(path, fm: fm)
         case .removeDirectory(let path):
             return removePath(path, fm: fm)
+        case .removeDataKeepingThemes(let path):
+            return removeDataExceptThemes(path, fm: fm)
         }
+    }
+
+    /// Remove everything under `~/.agent-island` EXCEPT `themes/` (state.json, the socket, the lock,
+    /// logs…), so the user's custom/downloaded themes survive an uninstall. If no `themes/` remains,
+    /// the now-empty data dir is removed too. Absent dir = success (idempotent).
+    private static func removeDataExceptThemes(_ dir: String, fm: FileManager) -> Bool {
+        guard fm.fileExists(atPath: dir) else { return true }
+        var ok = true
+        let children = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+        for name in children where name != "themes" {
+            ok = removePath("\(dir)/\(name)", fm: fm) && ok
+        }
+        // If nothing (no custom themes) is left, clean up the empty data dir.
+        if ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).isEmpty {
+            ok = removePath(dir, fm: fm) && ok
+        } else {
+            out("  kept \(dir)/themes (your custom themes)")
+        }
+        return ok
     }
 
     /// Remove a path if present; an absent path is success (idempotent uninstall). A real removal
