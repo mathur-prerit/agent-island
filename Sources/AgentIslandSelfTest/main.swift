@@ -1,10 +1,12 @@
 import Foundation
 import Darwin
+import SQLite3
 import AgentIslandCore
 import PersonaKit
 import HookInstall
 import AgentIslandDaemon
 import AgentIslandThemes
+import AgentIslandCLICore
 
 // Framework-free self-test. Runs under Command Line Tools (no Xcode/XCTest/Testing).
 // `swift run AgentIslandSelfTest` — exits non-zero on any failure (usable in CI).
@@ -138,6 +140,93 @@ check(ourEntryCount(bothHooked, event: "Stop", command: appCmd) == 1, "U4b: app+
 if case .success(let cleaned) = SettingsMerge.uninstall(existing: appHooked, command: cliCmd) {
     check(ourEntryCount(cleaned, event: "Stop", command: appCmd) == 0, "U4b: CLI-form uninstall removes the app-installed hook (no strand)")
 } else { check(false, "U4b: cross-form uninstall succeeded") }
+
+// U4c: the `curl|sh` installer wires the hook under the binary name `agentisland-hook`, so its
+// argv[0]-derived command is `agentisland-hook relay` (bare or absolute) — a DIFFERENT token than the
+// app's `AgentIslandHookCLI`. The signature matcher must recognise BOTH naming styles, or `uninstall`
+// (which reverses via the `AgentIslandHookCLI relay` form) strands the installer-wired hook pointing at
+// a deleted binary, erroring on every Claude Code lifecycle event. (These assertions FAIL before the
+// matcher fix and PASS after.)
+let hookBareCmd = "agentisland-hook relay"
+let hookAbsCmd  = "/usr/local/bin/agentisland-hook relay"
+check(SettingsMerge.isAgentIslandRelay(hookBareCmd) && SettingsMerge.isAgentIslandRelay(hookAbsCmd),
+      "U4c: installer-style `agentisland-hook relay` (bare + abs) recognised as our relay")
+check(SettingsMerge.isAgentIslandRelay(appCmd),
+      "U4c: app-style `\"<abs>/AgentIslandHookCLI\" relay` STILL recognised after the matcher widening")
+// Foreign hooks (and a bare `relay` with no agent-island token) must NOT be mistaken for ours.
+check(!SettingsMerge.isAgentIslandRelay("/usr/bin/say done")
+      && !SettingsMerge.isAgentIslandRelay("/opt/some/other-tool relay")
+      && !SettingsMerge.isAgentIslandRelay("relay"),
+      "U4c: a foreign command (even one ending in ' relay') is NOT treated as our relay")
+// uninstall (reversing with the CLI/app `AgentIslandHookCLI relay` form, as `agentisland uninstall`
+// does) removes EVERY agent-island relay strand across both naming styles, while preserving a foreign
+// hook and unrelated keys.
+let reversalCmd = "AgentIslandHookCLI relay"   // the form SettingsFile.uninstall is invoked with
+let mixedSettings = Data("""
+{
+  "topKey": 99,
+  "hooks": {
+    "Stop": [
+      {"hooks":[{"type":"command","command":"agentisland-hook relay"}]},
+      {"hooks":[{"type":"command","command":"/usr/local/bin/agentisland-hook relay"}]},
+      {"hooks":[{"type":"command","command":"\\"/Applications/AgentIsland.app/Contents/MacOS/AgentIslandHookCLI\\" relay"}]},
+      {"hooks":[{"type":"command","command":"/usr/bin/say boop"}]}
+    ]
+  }
+}
+""".utf8)
+if case .success(let cleaned) = SettingsMerge.uninstall(existing: mixedSettings, command: reversalCmd) {
+    let root = (try? JSONSerialization.jsonObject(with: cleaned) as? [String: Any]) ?? [:]
+    let stop = ((root["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]]) ?? []
+    func cmds(_ entries: [[String: Any]]) -> [String] {
+        entries.flatMap { ($0["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? [] }
+    }
+    let remaining = cmds(stop)
+    check(!remaining.contains("agentisland-hook relay"), "U4c: uninstall removes the bare `agentisland-hook relay` strand")
+    check(!remaining.contains("/usr/local/bin/agentisland-hook relay"), "U4c: uninstall removes the abs `/usr/local/bin/agentisland-hook relay` strand")
+    check(!remaining.contains(where: { $0.contains("AgentIslandHookCLI") }), "U4c: uninstall still removes the app-style `\"<abs>/AgentIslandHookCLI\" relay`")
+    check(remaining == ["/usr/bin/say boop"], "U4c: uninstall PRESERVES the foreign `/usr/bin/say` hook (only ours removed)")
+    check((root["topKey"] as? Int) == 99, "U4c: uninstall preserves unrelated top-level keys")
+} else { check(false, "U4c: mixed-style uninstall succeeded") }
+
+// U4d: composed round-trip — install the hook exactly as the `curl|sh` installer does (binary named
+// `agentisland-hook`, so command = `agentisland-hook relay`) via the real SettingsFile on a temp file,
+// then run the uninstall reversal (`AgentIslandHookCLI relay`, as `agentisland uninstall` does) and
+// assert the file is hook-free afterward. (FAILS before the matcher fix — the strand survives.)
+do {
+    let rtDir = NSTemporaryDirectory() + "ai-hook-roundtrip-\(getpid())-\(UUID().uuidString)"
+    try? FileManager.default.createDirectory(atPath: rtDir, withIntermediateDirectories: true)
+    let rtPath = rtDir + "/settings.json"
+    try? Data(#"{"keep":1}"#.utf8).write(to: URL(fileURLWithPath: rtPath))
+    let rtEvents = ["Stop", "UserPromptSubmit", "SessionEnd"]
+    _ = try? SettingsFile.install(settingsPath: rtPath, command: "agentisland-hook relay", events: rtEvents)
+    // sanity: the installer-named hook really landed
+    let afterInstall = (try? Data(contentsOf: URL(fileURLWithPath: rtPath))) ?? Data()
+    let installRoot = (try? JSONSerialization.jsonObject(with: afterInstall) as? [String: Any]) ?? [:]
+    let installHooks = (installRoot["hooks"] as? [String: Any]) ?? [:]
+    let landed = rtEvents.allSatisfy { ev in
+        (((installHooks[ev] as? [[String: Any]]) ?? []).flatMap {
+            ($0["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? []
+        }).contains("agentisland-hook relay")
+    }
+    check(landed, "U4d: round-trip — installer-style `agentisland-hook relay` wires into every event")
+    // now reverse via the app/CLI canonical form, as `agentisland uninstall` does
+    _ = try? SettingsFile.uninstall(settingsPath: rtPath, command: "AgentIslandHookCLI relay")
+    let afterUninstall = (try? Data(contentsOf: URL(fileURLWithPath: rtPath))) ?? Data()
+    let upRoot = (try? JSONSerialization.jsonObject(with: afterUninstall) as? [String: Any]) ?? [:]
+    let upHooks = (upRoot["hooks"] as? [String: Any]) ?? [:]
+    // Detect a surviving strand by the LITERAL installed command text (not via isAgentIslandRelay) so
+    // this assertion is independent of the matcher under test — under the buggy matcher the strand
+    // would survive AND go undetected by isAgentIslandRelay, so this must catch the raw string.
+    let anyRelayLeft = upHooks.values.contains { value in
+        (((value as? [[String: Any]]) ?? []).flatMap {
+            ($0["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? []
+        }).contains { $0.contains("relay") }
+    }
+    check(!anyRelayLeft, "U4d: round-trip — after the reversal NO agent-island relay hook strands (settings is hook-free)")
+    check((upRoot["keep"] as? Int) == 1, "U4d: round-trip — unrelated keys survive the install/uninstall cycle")
+    try? FileManager.default.removeItem(atPath: rtDir)
+}
 
 // --- Daemon IPC (U3) ---
 check(FrameCodec.isAcceptableLength(0), "frame length 0 acceptable")
@@ -519,6 +608,51 @@ check(SemVer.isAtLeast("0.3.0", "0.3.0") && SemVer.isAtLeast("0.4.0", "0.3.0") &
       "semver: equal / newer / fewer-components-but-greater all satisfy")
 check(!SemVer.isAtLeast("0.2.9", "0.3.0") && !SemVer.isAtLeast("0.3.0", "0.3.1"), "semver: older app fails the minimum")
 check(SemVer.isAtLeast("0.1.0", nil) && SemVer.isAtLeast("0.1.0", ""), "semver: nil/blank minimum always satisfied")
+
+// --- "Update available" indicator: strict-newer compare, tag parse, decision (all network-free) ---
+// SemVer.isNewer is the strict ">" the "update available = latest > installed" decision needs.
+check(SemVer.isNewer("0.4.0", than: "0.3.0") && !SemVer.isNewer("0.3.0", than: "0.4.0"),
+      "semver newer: 0.4.0 > 0.3.0, not the reverse")
+check(!SemVer.isNewer("0.3.0", than: "0.3.0"), "semver newer: equal is NOT strictly newer")
+check(SemVer.isNewer("1.0", than: "0.9.9") && !SemVer.isNewer("0.9.9", than: "1.0"),
+      "semver newer: multi-segment 1.0 > 0.9.9 (pads missing component with 0)")
+check(SemVer.isNewer("0.4.0", than: nil) && SemVer.isNewer("0.4.0", than: ""),
+      "semver newer: any version beats a nil/blank baseline")
+check(!SemVer.isNewer("nightly", than: "0.3.0") && !SemVer.isNewer("0.3.0", than: "0.3.0"),
+      "semver newer: a non-numeric tag (→0.0.0) is never newer; handled without crashing")
+
+// Tag parse: a leading v/V is stripped; a bare version passes through; junk is handled (not a crash).
+check(ReleaseFeed.normalizeTag("v0.4.0") == "0.4.0" && ReleaseFeed.normalizeTag("0.4.0") == "0.4.0",
+      "tag parse: 'v0.4.0' and '0.4.0' both normalise to '0.4.0'")
+check(ReleaseFeed.normalizeTag("V1.2.3") == "1.2.3" && ReleaseFeed.normalizeTag("  v0.5.0  ") == "0.5.0",
+      "tag parse: leading V + surrounding whitespace trimmed")
+check(ReleaseFeed.normalizeTag("") == nil && ReleaseFeed.normalizeTag("   ") == nil,
+      "tag parse: empty / whitespace-only tag → nil")
+check(ReleaseFeed.normalizeTag("nightly") == "nightly", "tag parse: a junk tag survives (compares as 0.0.0 downstream)")
+check(ReleaseFeed.parseLatestTag(Data(#"{"tag_name":"v0.4.0","name":"Release"}"#.utf8)) == "0.4.0",
+      "tag parse: GitHub releases/latest JSON → 'v0.4.0' → '0.4.0'")
+check(ReleaseFeed.parseLatestTag(Data(#"{"tag_name":""}"#.utf8)) == nil, "tag parse: empty tag_name → nil")
+check(ReleaseFeed.parseLatestTag(Data(#"{"no_tag":"x"}"#.utf8)) == nil, "tag parse: missing tag_name → nil")
+check(ReleaseFeed.parseLatestTag(Data("not json".utf8)) == nil, "tag parse: non-JSON → nil (no crash)")
+check(ReleaseFeed.parseLatestTag(Data("[]".utf8)) == nil, "tag parse: JSON that isn't an object → nil")
+
+// Update decision: available when latest>installed; quiet when equal/older/offline; respects dismissal.
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.4.0", dismissed: nil) == .available(version: "0.4.0"),
+      "update decide: newer latest → .available")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.3.0", dismissed: nil) == .upToDate,
+      "update decide: equal latest → .upToDate")
+check(UpdateAvailability.decide(installed: "0.4.0", latest: "0.3.0", dismissed: nil) == .upToDate,
+      "update decide: older latest → .upToDate")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: nil, dismissed: nil) == .upToDate,
+      "update decide: nil latest (offline / parse miss) → .upToDate")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.4.0", dismissed: "0.4.0") == .upToDate,
+      "update decide: dismissed == latest → suppressed (don't nag)")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.5.0", dismissed: "0.4.0") == .available(version: "0.5.0"),
+      "update decide: a release strictly newer than the dismissed one reappears")
+check(UpdateAvailability.decide(installed: "0.3.0", latest: "0.4.0", dismissed: nil).offeredVersion == "0.4.0"
+      && UpdateAvailability.decide(installed: "0.3.0", latest: "0.3.0", dismissed: nil).offeredVersion == nil,
+      "update decide: offeredVersion mirrors .available / .upToDate")
+
 check(ColorRefSyntax.isHex("#E52521") && ColorRefSyntax.isHex("#E52521FF"), "colour: 6- and 8-digit hex valid")
 check(!ColorRefSyntax.isHex("#E525") && !ColorRefSyntax.isHex("#GGGGGG") && !ColorRefSyntax.isHex("E52521"),
       "colour: wrong-length / non-hex / missing-hash rejected")
@@ -636,6 +770,823 @@ rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tint":{"working":
 check(ColorRefSyntax.isValid("system:teal", palette: [:]) && ColorRefSyntax.isValid("system:secondaryLabel", palette: [:])
       && !ColorRefSyntax.isValid("system:bogus", palette: [:]),
       "colour: system name validated against the shared resolver allowlist")
+
+// --- Theme catalog: strict decode of the hosted download index ---
+let validCatalog = """
+{
+  "themes": [
+    { "id": "critter", "displayName": "Pixel Critter", "version": "1.0.0",
+      "url": "https://example.com/critter.zip",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sizeBytes": 4096, "minAppVersion": "0.1.0" },
+    { "id": "neon", "displayName": "Neon", "version": "2.1.0",
+      "url": "https://example.com/neon.zip",
+      "sha256": "abc123", "sizeBytes": 8192, "minAppVersion": null }
+  ]
+}
+"""
+if case .success(let cat) = ThemeCatalog.decode(Data(validCatalog.utf8)) {
+    check(cat.themes.count == 2, "catalog: decodes both entries")
+    check(cat.themes[0].id == "critter" && cat.themes[0].displayName == "Pixel Critter"
+          && cat.themes[0].sizeBytes == 4096 && cat.themes[0].minAppVersion == "0.1.0",
+          "catalog: entry scalar fields decode")
+    check(cat.themes[1].minAppVersion == nil, "catalog: null minAppVersion decodes to nil")
+} else {
+    check(false, "catalog: a valid index must decode")
+}
+// Strict keys: an unknown field anywhere in the index rejects the whole catalog (no smuggling, same
+// posture as the manifest loader's strict top-level keys).
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data(#"{"themes":[{"id":"x","displayName":"X","version":"1","url":"u","sha256":"h","sizeBytes":1,"exec":"rm -rf"}]}"#.utf8)) { return true }; return false }(),
+      "catalog: unknown per-entry key (e.g. exec) rejected (strict, no smuggling)")
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data(#"{"bogus":[]}"#.utf8)) { return true }; return false }(),
+      "catalog: missing 'themes' key rejected")
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data("not json".utf8)) { return true }; return false }(),
+      "catalog: non-JSON index rejected")
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data("[]".utf8)) { return true }; return false }(),
+      "catalog: bare array (wrong shape) rejected — index is an object")
+
+// --- Theme catalog: integrity verify (size + sha256), the pre-extraction download gate ---
+// Compute a real digest of a fixture blob so the MATCH case is genuine without any network.
+let blob = Data("agent-island theme payload".utf8)
+let digest = ThemeCatalogEntry.sha256Hex(blob)
+check(digest.count == 64 && digest == digest.lowercased(), "catalog: sha256Hex is 64-char lowercase hex")
+func entryFor(_ data: Data, sha: String) -> ThemeCatalogEntry {
+    ThemeCatalogEntry(id: "t", displayName: "T", version: "1", url: "u", sha256: sha,
+                      sizeBytes: data.count, minAppVersion: nil)
+}
+check(entryFor(blob, sha: digest).verify(blob) == nil, "catalog: matching size + sha256 verifies (nil)")
+// Upper-case sha in the index still matches (case-insensitive compare).
+check(entryFor(blob, sha: digest.uppercased()).verify(blob) == nil, "catalog: upper-case sha in index still matches")
+// Size mismatch: declared size != actual blob length.
+let sizeBadEntry = ThemeCatalogEntry(id: "t", displayName: "T", version: "1", url: "u",
+                                     sha256: digest, sizeBytes: blob.count + 1, minAppVersion: nil)
+check(sizeBadEntry.verify(blob) == .sizeMismatch(expected: blob.count + 1, actual: blob.count),
+      "catalog: size mismatch rejected before sha check")
+// Hash mismatch: right size, wrong (tampered) bytes — the digest differs.
+let tampered = Data("agent-island theme payloads".utf8)   // one extra byte changes the digest
+check(entryFor(tampered, sha: digest).verify(tampered) != nil, "catalog: tampered bytes fail sha (non-nil)")
+if case .hashMismatch(let expected, let actual)? = entryFor(tampered, sha: digest).verify(tampered) {
+    check(expected == digest && actual != digest && actual == ThemeCatalogEntry.sha256Hex(tampered),
+          "catalog: hash mismatch reports expected vs. actual digest")
+} else { check(false, "catalog: tampered bytes must report .hashMismatch") }
+// Size is checked first (cheap) — a wrong-size blob never reaches the sha compare.
+check(entryFor(blob, sha: "deadbeef").verify(Data()).map { if case .sizeMismatch = $0 { return true }; return false } == true,
+      "catalog: empty blob fails on size, not sha")
+
+// --- Theme catalog: entry id is a safe single path segment (HIGH-3 escape guard) ---
+// The id becomes the install folder name (`~/.agent-island/themes/<id>/`); a `..`/`a/b`/empty id would
+// escape that root (a later removeItem could delete the themes dir), so it's gated before any download.
+check(ThemeCatalogEntry.isSafeID("critter") && ThemeCatalogEntry.isSafeID("neon-2"),
+      "id-safe: a plain folder name is a safe id")
+check(!ThemeCatalogEntry.isSafeID(".."), "id-safe: '..' rejected (would escape install root)")
+check(!ThemeCatalogEntry.isSafeID("."), "id-safe: '.' rejected")
+check(!ThemeCatalogEntry.isSafeID(""), "id-safe: empty id rejected")
+check(!ThemeCatalogEntry.isSafeID("a/b"), "id-safe: 'a/b' (separator) rejected")
+check(!ThemeCatalogEntry.isSafeID("../evil"), "id-safe: '../evil' rejected")
+check(!ThemeCatalogEntry.isSafeID("a\\b"), "id-safe: backslash rejected")
+check(!ThemeCatalogEntry.isSafeID("a\u{0}b"), "id-safe: NUL rejected")
+check(ThemeCatalogEntry.isSafeID("a..b"), "id-safe: '..' as a substring of a single segment is fine")
+
+// --- ZipInspector: defensive central-directory parsing on CRAFTED hostile bytes (HIGH-1) ---
+// A from-scratch zip builder that emits ONLY a central directory + EOCD (the inspector reads no local
+// headers / file data), so a crafted entry's name, sizes, and unix mode are set verbatim — no real
+// archive, no disk, no network. external-attrs high 16 bits carry the unix st_mode (symlink detection).
+func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)] }
+func le32(_ v: UInt64) -> [UInt8] {
+    [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]
+}
+func le64(_ v: UInt64) -> [UInt8] { (0..<8).map { UInt8((v >> (8 * $0)) & 0xFF) } }
+struct CraftEntry { var name: String; var uncompressed: UInt64; var compressed: UInt64; var mode: UInt16 }
+// Build a central-directory header for one entry. `zip64` packs the sizes into the extra field and puts
+// the 0xFFFFFFFF sentinel in the 32-bit size slots (exercises the zip64 path).
+func centralHeader(_ e: CraftEntry, zip64: Bool) -> [UInt8] {
+    let nameBytes = Array(e.name.utf8)
+    var extra: [UInt8] = []
+    var compField = le32(e.compressed)
+    var uncompField = le32(e.uncompressed)
+    if zip64 {
+        compField = le32(0xFFFFFFFF); uncompField = le32(0xFFFFFFFF)
+        // zip64 extra: id 0x0001, data length 16, then uncompressed (8) + compressed (8) in that order.
+        extra = le16(0x0001) + le16(16) + le64(e.uncompressed) + le64(e.compressed)
+    }
+    var h: [UInt8] = []
+    h += le32(0x02014b50)            // central file header signature
+    h += le16(20)                    // version made by
+    h += le16(20)                    // version needed
+    h += le16(0)                     // flags
+    h += le16(0)                     // compression method (stored)
+    h += le16(0) + le16(0)           // mod time + date
+    h += le32(0)                     // crc32
+    h += compField                   // compressed size (or sentinel)
+    h += uncompField                 // uncompressed size (or sentinel)
+    h += le16(nameBytes.count)       // file name length
+    h += le16(extra.count)           // extra field length
+    h += le16(0)                     // file comment length
+    h += le16(0)                     // disk number start
+    h += le16(0)                     // internal attrs
+    h += le32(UInt64(e.mode) << 16)  // external attrs: unix mode in the high 16 bits
+    h += le32(0)                     // local header offset
+    h += nameBytes
+    h += extra
+    return h
+}
+// Assemble a whole archive: an optional leading "local data" filler (so the CD offset isn't 0), the
+// central directory, then the EOCD pointing at it.
+func craftZip(_ entries: [CraftEntry], zip64: Bool = false,
+              leadingBytes: Int = 8, comment: [UInt8] = []) -> Data {
+    let lead = [UInt8](repeating: 0, count: leadingBytes)
+    var cd: [UInt8] = []
+    for e in entries { cd += centralHeader(e, zip64: zip64) }
+    let cdOffset = lead.count
+    var eocd: [UInt8] = []
+    eocd += le32(0x06054b50)               // EOCD signature
+    eocd += le16(0) + le16(0)              // disk numbers
+    eocd += le16(entries.count)            // cd records on this disk
+    eocd += le16(entries.count)            // total cd records
+    eocd += le32(UInt64(cd.count))         // cd size
+    eocd += le32(UInt64(cdOffset))         // cd offset
+    eocd += le16(comment.count)            // comment length
+    eocd += comment
+    return Data(lead + cd + eocd)
+}
+// A regular-file unix mode (S_IFREG | 0644) and a symlink mode (S_IFLNK | 0777).
+let regMode: UInt16 = 0o100644
+let lnkMode: UInt16 = 0o120777
+
+// Valid central directory parses: two benign files, sizes + names + (no) symlink read back correctly.
+let validZip = craftZip([
+    CraftEntry(name: "theme.json", uncompressed: 200, compressed: 120, mode: regMode),
+    CraftEntry(name: "images/x.png", uncompressed: 4096, compressed: 2048, mode: regMode),
+])
+switch ZipInspector.inspect(validZip) {
+case .success(let entries):
+    check(entries.count == 2 && entries[0].name == "theme.json" && entries[0].uncompressedSize == 200
+          && entries[1].name == "images/x.png" && entries[1].compressedSize == 2048
+          && !entries[0].isSymlink,
+          "zipinspect: valid central directory parses (names, sizes, not-symlink)")
+case .failure(let e):
+    check(false, "zipinspect: valid central directory must parse [got \(e)]")
+}
+// checkArchive on the valid zip with sane sizes passes (within all PackLimits).
+check(ZipInspector.checkArchive(validZip, archiveBytes: validZip.count) == nil,
+      "zipinspect: a benign small archive passes all limits")
+
+// A `../` name is rejected as an unsafe (zip-slip) name, pre-extraction.
+let traversalZip = craftZip([CraftEntry(name: "../escape.png", uncompressed: 10, compressed: 10, mode: regMode)])
+check(ZipInspector.checkArchive(traversalZip, archiveBytes: traversalZip.count) == .unsafeName("../escape.png"),
+      "zipinspect: a '../' entry name rejected (zip-slip)")
+// An absolute name is rejected as unsafe.
+let absoluteZip = craftZip([CraftEntry(name: "/etc/passwd", uncompressed: 10, compressed: 10, mode: regMode)])
+check(ZipInspector.checkArchive(absoluteZip, archiveBytes: absoluteZip.count) == .unsafeName("/etc/passwd"),
+      "zipinspect: an absolute entry name rejected")
+// A symlink-mode entry is rejected as a symlink (S_IFLNK in the external-attrs unix mode).
+let symlinkZip = craftZip([CraftEntry(name: "link", uncompressed: 8, compressed: 8, mode: lnkMode)])
+check(ZipInspector.checkArchive(symlinkZip, archiveBytes: symlinkZip.count) == .symlink("link"),
+      "zipinspect: a symlink-mode entry rejected (S_IFLNK)")
+// A single file over the 5 MB per-file limit is rejected as .fileTooLarge.
+let bigFileZip = craftZip([CraftEntry(name: "big.bin", uncompressed: 6 * 1024 * 1024, compressed: 1000, mode: regMode)])
+check(ZipInspector.checkArchive(bigFileZip, archiveBytes: bigFileZip.count) == .limit(.fileTooLarge),
+      "zipinspect: a single declared file over the 5 MB per-file cap rejected (.fileTooLarge)")
+// 12 files each under the per-file cap but summing past the 50 MB TOTAL cap → .uncompressedTooLarge.
+let bombTotal = craftZip((0..<12).map { CraftEntry(name: "f\($0).bin", uncompressed: 4_500_000, compressed: 1000, mode: regMode) })
+check(ZipInspector.checkArchive(bombTotal, archiveBytes: 200_000) == .limit(.uncompressedTooLarge),
+      "zipinspect: declared TOTAL uncompressed over the 50 MB cap rejected (each file under per-file cap)")
+// A small archive that claims a ~100x+ inflate within the per-file/total caps still trips the RATIO.
+let ratioZip = craftZip([CraftEntry(name: "a.bin", uncompressed: 4 * 1024 * 1024, compressed: 10, mode: regMode)])
+check(ZipInspector.checkArchive(ratioZip, archiveBytes: 1000) == .limit(.compressionBomb),
+      "zipinspect: compression ratio over limit rejected (declared, pre-extraction)")
+// Truncated/garbage bytes never crash — they return a typed error (no EOCD found).
+check({ if case .failure(.notAZip) = ZipInspector.inspect(Data("not a zip at all, just text".utf8)) { return true }; return false }(),
+      "zipinspect: garbage bytes rejected without crash (.notAZip)")
+check({ if case .failure(.notAZip) = ZipInspector.inspect(Data()) { return true }; return false }(),
+      "zipinspect: empty input rejected without crash")
+// A truncated central directory (EOCD claims a CD that runs past the bytes) is malformed, not a crash.
+var truncated = [UInt8](craftZip([CraftEntry(name: "x", uncompressed: 1, compressed: 1, mode: regMode)]))
+truncated.removeLast(30)   // lop off the EOCD + tail
+check({ if case .failure = ZipInspector.inspect(Data(truncated)) { return true }; return false }(),
+      "zipinspect: truncated archive rejected without crash")
+// A trailing zip comment is handled (EOCD found by scanning back past the comment).
+let commentedZip = craftZip([CraftEntry(name: "theme.json", uncompressed: 50, compressed: 50, mode: regMode)],
+                            comment: Array("a friendly zip comment".utf8))
+check({ if case .success(let es) = ZipInspector.inspect(commentedZip), es.count == 1 { return true }; return false }(),
+      "zipinspect: a trailing zip comment is handled (EOCD located past it)")
+// zip64: sizes live in the extra field (32-bit slots are the 0xFFFFFFFF sentinel) — read them back.
+let zip64Zip = craftZip([CraftEntry(name: "huge.bin", uncompressed: 0xFFFF_FFFF + 100, compressed: 0xFFFF_FFFF + 1, mode: regMode)],
+                        zip64: true)
+switch ZipInspector.inspect(zip64Zip) {
+case .success(let es):
+    check(es.count == 1 && es[0].uncompressedSize == Int(0xFFFF_FFFF + 100),
+          "zipinspect: zip64 sizes resolved from the extra field")
+case .failure(let e):
+    check(false, "zipinspect: zip64 archive must parse [got \(e)]")
+}
+// An EOCD claiming the MAX 16-bit entry count (65535) but with NO backing central directory must be
+// rejected as malformed on the first header parse — it must NOT loop 65535 times or crash. (The
+// .tooManyEntries ceiling guards the zip64 path where the count can exceed 100k; a 16-bit EOCD caps at
+// 65535, below the ceiling, so this exercises the bounded-loop / forward-progress guard instead.)
+var dosEOCD: [UInt8] = []
+dosEOCD += le32(0x06054b50) + le16(0) + le16(0) + le16(0xFFFF) + le16(0xFFFF) + le32(0) + le32(0) + le16(0)
+check({ if case .failure(.malformed) = ZipInspector.inspect(Data(dosEOCD)) { return true }; return false }(),
+      "zipinspect: EOCD claiming 65535 entries with no backing CD -> .malformed (bounded, no crash/spin)")
+
+// --- ThemeInstaller: OFFLINE install pipeline driven from a LOCAL fixture zip (no network) ---
+// Build a REAL zip with /usr/bin/ditto at test time (the same engine the installer extracts with), run
+// the install-from-local-zip path, and assert it lands a valid theme dir. THIS is the regression proof
+// that the feature actually works end-to-end (HIGH-2) — not just compiles.
+var fixtureWorkDirs: [URL] = []   // collected so the test cleans every fixture scratch dir at the end
+func makeFixtureZip(themeID: String, manifestJSON: String, extraFiles: [(String, Data)] = [],
+                    symlink: (name: String, target: String)? = nil) -> URL? {
+    let fm = FileManager.default
+    let work = fm.temporaryDirectory.appendingPathComponent("ai-fixture-\(UUID().uuidString)", isDirectory: true)
+    fixtureWorkDirs.append(work)
+    let src = work.appendingPathComponent(themeID, isDirectory: true)   // wrap in one folder (the common case)
+    try? fm.createDirectory(at: src.appendingPathComponent("images"), withIntermediateDirectories: true)
+    try? Data(manifestJSON.utf8).write(to: src.appendingPathComponent("theme.json"))
+    for (rel, data) in extraFiles { try? data.write(to: src.appendingPathComponent(rel)) }
+    if let link = symlink {
+        try? fm.createSymbolicLink(atPath: src.appendingPathComponent(link.name).path, withDestinationPath: link.target)
+    }
+    let zipURL = work.appendingPathComponent("\(themeID).zip")
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+    proc.arguments = ["-c", "-k", "--sequesterRsrc", src.path, zipURL.path]   // -c create, -k PKZip
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do { try proc.run() } catch { return nil }
+    proc.waitUntilExit()
+    return proc.terminationStatus == 0 ? zipURL : nil
+}
+func fixtureEntry(id: String, zipURL: URL) -> ThemeCatalogEntry {
+    let data = (try? Data(contentsOf: zipURL)) ?? Data()
+    return ThemeCatalogEntry(id: id, displayName: "Fixture \(id)", version: "1.0.0",
+                             url: "https://example.com/\(id).zip",
+                             sha256: ThemeCatalogEntry.sha256Hex(data), sizeBytes: data.count, minAppVersion: nil)
+}
+// A minimal VALID manifest (id must equal the install folder name).
+func fixtureManifest(id: String) -> String {
+    """
+    {"schemaVersion":1,"id":"\(id)","displayName":"Fixture","states":{"idle":{"visual":{"kind":"image","file":"images/x.png"}}}}
+    """
+}
+let installFM = FileManager.default
+// A throwaway install root + scratch dir (NOT the user's real ~/.agent-island).
+let benignRoot = installFM.temporaryDirectory.appendingPathComponent("ai-install-root-\(UUID().uuidString)", isDirectory: true)
+let benignScratch = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+try? installFM.createDirectory(at: benignScratch, withIntermediateDirectories: true)
+fixtureWorkDirs.append(benignRoot); fixtureWorkDirs.append(benignScratch)   // cleaned at the end (exit() skips defer)
+
+if let zipURL = makeFixtureZip(themeID: "fixtheme", manifestJSON: fixtureManifest(id: "fixtheme"),
+                               extraFiles: [("images/x.png", Data([0x89, 0x50, 0x4E, 0x47]))]) {
+    let entry = fixtureEntry(id: "fixtheme", zipURL: zipURL)
+    let result = ThemeInstaller.installFromLocalZip(zipURL, entry: entry, appVersion: "0.3.0",
+                                                    installRoot: benignRoot, scratch: benignScratch)
+    switch result {
+    case .success(let id):
+        let landed = benignRoot.appendingPathComponent("fixtheme").appendingPathComponent("theme.json")
+        check(id == "fixtheme" && installFM.fileExists(atPath: landed.path),
+              "installer: a benign theme installs end-to-end (HIGH-2 regression — feature actually works)")
+    case .failure(let e):
+        check(false, "installer: benign theme must install [got \(e)]")
+    }
+} else {
+    check(false, "installer: ditto fixture zip must build (test environment needs /usr/bin/ditto)")
+}
+
+// Benign install with a TAMPERED catalog entry (wrong sha) is rejected at the integrity gate.
+if let zipURL2 = makeFixtureZip(themeID: "tamper", manifestJSON: fixtureManifest(id: "tamper")) {
+    var bad = fixtureEntry(id: "tamper", zipURL: zipURL2)
+    bad = ThemeCatalogEntry(id: "tamper", displayName: bad.displayName, version: bad.version, url: bad.url,
+                            sha256: String(repeating: "0", count: 64), sizeBytes: bad.sizeBytes, minAppVersion: nil)
+    let scratch2 = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+    try? installFM.createDirectory(at: scratch2, withIntermediateDirectories: true)
+    fixtureWorkDirs.append(scratch2)
+    let r = ThemeInstaller.installFromLocalZip(zipURL2, entry: bad, appVersion: "0.3.0",
+                                               installRoot: benignRoot, scratch: scratch2)
+    check({ if case .failure(.integrity) = r { return true }; return false }(),
+          "installer: a sha mismatch is rejected at the integrity gate (before extraction)")
+}
+
+// id-escape rejected before ANY filesystem mutation: an id of `..` / `a/b` / empty never moves a file.
+let escScratch = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+try? installFM.createDirectory(at: escScratch, withIntermediateDirectories: true)
+fixtureWorkDirs.append(escScratch)
+let dummyZip = escScratch.appendingPathComponent("dummy.zip")
+try? Data([0x00]).write(to: dummyZip)   // never read — id gate fails first
+for badID in ["..", "a/b", ""] {
+    let e = ThemeCatalogEntry(id: badID, displayName: "x", version: "1", url: "https://e/x.zip",
+                              sha256: "x", sizeBytes: 1, minAppVersion: nil)
+    let r = ThemeInstaller.installFromLocalZip(dummyZip, entry: e, appVersion: "0.3.0",
+                                               installRoot: benignRoot, scratch: escScratch)
+    check({ if case .failure(.unsafeID) = r { return true }; return false }(),
+          "installer: id '\(badID)' rejected before any filesystem mutation")
+}
+// isDirectChild guards the move target: a direct child passes, a `..` escape does not.
+check(ThemeInstaller.isDirectChild(benignRoot.appendingPathComponent("ok"), of: benignRoot),
+      "installer: a direct child of the install root is allowed as a move target")
+check(!ThemeInstaller.isDirectChild(benignRoot.appendingPathComponent("a/b"), of: benignRoot),
+      "installer: a nested path is NOT a direct child (move refused)")
+
+// A theme zip containing a SYMLINK is rejected (pre-extraction by the inspector if mode-marked, AND
+// post-extraction by the lstat walk — here ditto writes a real symlink, exercising the post path).
+if let symZip = makeFixtureZip(themeID: "evil", manifestJSON: fixtureManifest(id: "evil"),
+                               extraFiles: [("images/x.png", Data([0x89]))],
+                               symlink: (name: "link", target: "/etc/passwd")) {
+    let e = fixtureEntry(id: "evil", zipURL: symZip)
+    let scratch3 = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+    try? installFM.createDirectory(at: scratch3, withIntermediateDirectories: true)
+    fixtureWorkDirs.append(scratch3)
+    let r = ThemeInstaller.installFromLocalZip(symZip, entry: e, appVersion: "0.3.0",
+                                               installRoot: benignRoot, scratch: scratch3)
+    check({ if case .failure(.symlinkInArchive) = r { return true }
+            if case .failure(.zip(.symlink)) = r { return true }   // pre-extraction reject is also acceptable
+            return false }(),
+          "installer: a theme zip containing a symlink is rejected (symlink defense, both layers)")
+}
+
+// --- Theme URL scheme: only https accepted (MED-4), no network needed. (The App's ThemeDownloader
+// gates both the index URL and entry.url through this same pure check before any fetch.) ---
+check(ThemeCatalogEntry.isHTTPSURL("https://example.com/x.zip"), "url-scheme: https URL accepted")
+check(ThemeCatalogEntry.isHTTPSURL("HTTPS://EXAMPLE.com/x.zip"), "url-scheme: scheme compare is case-insensitive")
+check(!ThemeCatalogEntry.isHTTPSURL("http://example.com/x.zip"), "url-scheme: http (plaintext) rejected")
+check(!ThemeCatalogEntry.isHTTPSURL("file:///etc/passwd"), "url-scheme: file:// rejected")
+check(!ThemeCatalogEntry.isHTTPSURL("ftp://example.com/x.zip"), "url-scheme: ftp:// rejected")
+check(!ThemeCatalogEntry.isHTTPSURL("not a url at all"), "url-scheme: scheme-less string rejected")
+
+// --- Management CLI (`agentisland`): pure parse/dispatch, config allowlist, uninstall plan, theme-add
+// classification. All network-free + real-FS-free — the executable performs the effects. ---
+
+// Command parsing (total: every input → a Command).
+check(CommandParser.parse([]) == .help, "cli-parse: no args -> help")
+check(CommandParser.parse(["--help"]) == .help, "cli-parse: --help -> help")
+check(CommandParser.parse(["help"]) == .help, "cli-parse: help -> help")
+check(CommandParser.parse(["version"]) == .version, "cli-parse: version")
+check(CommandParser.parse(["--version"]) == .version, "cli-parse: --version")
+check(CommandParser.parse(["theme"]) == .themeList, "cli-parse: bare theme -> list")
+check(CommandParser.parse(["theme", "list"]) == .themeList, "cli-parse: theme list")
+check(CommandParser.parse(["theme", "add", "critter"]) == .themeAdd(idOrURL: "critter"), "cli-parse: theme add <id>")
+check(CommandParser.parse(["theme", "set", "minimal"]) == .themeSet(id: "minimal"), "cli-parse: theme set <id>")
+check({ if case .usageError = CommandParser.parse(["theme", "add"]) { return true }; return false }(),
+      "cli-parse: theme add with no arg -> usageError")
+check({ if case .usageError = CommandParser.parse(["theme", "bogus"]) { return true }; return false }(),
+      "cli-parse: unknown theme subcommand -> usageError")
+check(CommandParser.parse(["config"]) == .configList, "cli-parse: bare config -> list")
+check(CommandParser.parse(["config", "get", "islandTheme"]) == .configGet(key: "islandTheme"), "cli-parse: config get")
+check(CommandParser.parse(["config", "set", "soundCueSet", "default"]) == .configSet(key: "soundCueSet", value: "default"),
+      "cli-parse: config set")
+check({ if case .usageError = CommandParser.parse(["config", "set", "onlyKey"]) { return true }; return false }(),
+      "cli-parse: config set missing value -> usageError")
+check(CommandParser.parse(["update"]) == .update, "cli-parse: update")
+check({ if case .usageError = CommandParser.parse(["update", "now"]) { return true }; return false }(),
+      "cli-parse: update with extra arg -> usageError")
+check(CommandParser.parse(["uninstall"]) == .uninstall(yes: false, dryRun: false), "cli-parse: uninstall (no flags)")
+check(CommandParser.parse(["uninstall", "--yes"]) == .uninstall(yes: true, dryRun: false), "cli-parse: uninstall --yes")
+check(CommandParser.parse(["uninstall", "--dry-run"]) == .uninstall(yes: false, dryRun: true), "cli-parse: uninstall --dry-run")
+check(CommandParser.parse(["uninstall", "--yes", "--dry-run"]) == .uninstall(yes: true, dryRun: true),
+      "cli-parse: uninstall --yes --dry-run")
+check({ if case .usageError = CommandParser.parse(["uninstall", "--force"]) { return true }; return false }(),
+      "cli-parse: uninstall unknown flag -> usageError")
+check(CommandParser.parse(["start-on-boot"]) == .startOnBoot(.status), "cli-parse: bare start-on-boot -> status")
+check(CommandParser.parse(["start-on-boot", "on"]) == .startOnBoot(.on), "cli-parse: start-on-boot on")
+check(CommandParser.parse(["start-on-boot", "off"]) == .startOnBoot(.off), "cli-parse: start-on-boot off")
+check({ if case .usageError = CommandParser.parse(["start-on-boot", "maybe"]) { return true }; return false }(),
+      "cli-parse: start-on-boot bad verb -> usageError")
+check({ if case .unknown(let t) = CommandParser.parse(["frobnicate"]) { return t == "frobnicate" }; return false }(),
+      "cli-parse: unknown top-level command")
+
+// Help/usage surface mentions every subcommand (so README and --help can't silently drift apart).
+let usage = Help.usage
+for token in ["theme list", "theme add", "theme set", "config", "config get", "config set",
+              "update", "start-on-boot", "uninstall", "version"] {
+    check(usage.contains(token), "cli-help: usage mentions '\(token)'")
+}
+
+// Config allowlist + validation (pure — no defaults store touched).
+check(ConfigKeys.lookup("islandTheme") != nil, "cli-config: islandTheme is a known key")
+check(ConfigKeys.lookup("madeUpKey") == nil, "cli-config: an unknown key isn't on the allowlist")
+check({ if case .failure(.unknownKey) = ConfigKeys.validate(key: "nope", rawValue: "x") { return true }; return false }(),
+      "cli-config: validate rejects an unknown key")
+check(ConfigKeys.validate(key: "islandKeepAwake", rawValue: "true") == .success(.bool(true)),
+      "cli-config: bool key accepts 'true'")
+check(ConfigKeys.validate(key: "islandKeepAwake", rawValue: "off") == .success(.bool(false)),
+      "cli-config: bool key accepts 'off' -> false")
+check({ if case .failure(.invalidBool) = ConfigKeys.validate(key: "islandKeepAwake", rawValue: "maybe") { return true }; return false }(),
+      "cli-config: bool key rejects a non-bool")
+check(ConfigKeys.validate(key: "soundCueSet", rawValue: "default") == .success(.string("default")),
+      "cli-config: enum key accepts an allowed value")
+check({ if case .failure(.notAllowed) = ConfigKeys.validate(key: "soundCueSet", rawValue: "loud") { return true }; return false }(),
+      "cli-config: enum key rejects an off-list value")
+check(ConfigKeys.validate(key: "islandTheme", rawValue: "anything") == .success(.string("anything")),
+      "cli-config: free-string key (islandTheme) accepts any value (ids are dynamic)")
+
+// Uninstall PLAN against a temp HOME — assert EXACTLY what it would target (nothing performed).
+let cliSandboxHome = "/tmp/agentisland-selftest-\(UUID().uuidString)"
+let cliPaths = InstallPaths(home: cliSandboxHome, appPath: cliSandboxHome + "/App/AgentIsland.app",
+                            binDir: cliSandboxHome + "/bin")
+let cliPlan = UninstallPlan.plan(cliPaths)
+check(cliPlan.first == .reverseHooks(settingsPath: cliSandboxHome + "/.claude/settings.json"),
+      "cli-uninstall: plan reverses hooks FIRST (so a half-done uninstall still works)")
+check(cliPlan.contains(.unregisterLoginItem), "cli-uninstall: plan unregisters the login item")
+check(cliPlan.contains(.removeDirectory(path: cliSandboxHome + "/.agent-island")),
+      "cli-uninstall: plan removes ~/.agent-island")
+check(cliPlan.contains(.removeApp(path: cliSandboxHome + "/App/AgentIsland.app")),
+      "cli-uninstall: plan removes the .app")
+check(cliPlan.contains(.removeBinary(path: cliSandboxHome + "/bin/agentisland")),
+      "cli-uninstall: plan removes the agentisland binary")
+check(cliPlan.contains(.removeBinary(path: cliSandboxHome + "/bin/agentisland-hook")),
+      "cli-uninstall: plan removes the agentisland-hook binary")
+// CRITICAL: every path the plan targets stays UNDER the (sandbox) home — never the real system.
+let homeDerived: [String?] = cliPlan.map { action in
+    switch action {
+    case .reverseHooks(let p), .removeBinary(let p), .removeDirectory(let p), .removeApp(let p): return p
+    case .unregisterLoginItem: return nil
+    }
+}
+check(homeDerived.compactMap { $0 }.allSatisfy { $0.hasPrefix(cliSandboxHome) },
+      "cli-uninstall: EVERY filesystem target is under the sandbox home (never escapes it)")
+check(cliPlan.count == 6, "cli-uninstall: plan is exactly 6 actions (hooks, login item, 2 binaries, dir, app)")
+
+// HomeDir validation (pure: `HomeValidation` decides whether a `$HOME` is usable; the effectful
+// "is it an existing dir?" check is injected). A degenerate HOME ("/" or whitespace) must be REJECTED
+// so the destructive uninstall can't silently "succeed" against `//.agent-island`; a real existing dir
+// (the `HOME=$(mktemp -d)` sandbox) must be ACCEPTED so the dev workflow still lands in the sandbox.
+let allDirsExist: (String) -> Bool = { _ in true }
+check(!HomeValidation.isAcceptable("", dirExists: allDirsExist), "home-validation: empty HOME rejected")
+check(!HomeValidation.isAcceptable("   ", dirExists: allDirsExist), "home-validation: whitespace-only HOME rejected")
+check(!HomeValidation.isAcceptable("/", dirExists: allDirsExist), "home-validation: HOME='/' (filesystem root) rejected")
+check(!HomeValidation.isAcceptable("relative/path", dirExists: allDirsExist), "home-validation: a non-absolute HOME rejected")
+check(!HomeValidation.isAcceptable("/no/such/dir", dirExists: { _ in false }), "home-validation: an absolute but non-existent HOME rejected")
+check(HomeValidation.isAcceptable("/Users/me", dirExists: allDirsExist), "home-validation: an absolute existing dir accepted")
+check(HomeValidation.accepted("/Users/me", dirExists: allDirsExist) == "/Users/me", "home-validation: accepted returns the path when valid")
+check(HomeValidation.accepted("  /Users/me  ", dirExists: allDirsExist) == "/Users/me", "home-validation: accepted trims surrounding whitespace")
+check(HomeValidation.accepted("/", dirExists: allDirsExist) == nil, "home-validation: accepted returns nil for a rejected HOME (caller falls back)")
+// The real sandbox path the destructive-test workflow uses (HOME=$(mktemp -d)) must pass when present.
+let sandboxHome = NSTemporaryDirectory() + "ai-home-\(getpid())-\(UUID().uuidString)"
+try? FileManager.default.createDirectory(atPath: sandboxHome, withIntermediateDirectories: true)
+let realDirExists: (String) -> Bool = { p in
+    var isDir: ObjCBool = false
+    return FileManager.default.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue
+}
+check(HomeValidation.isAcceptable(sandboxHome, dirExists: realDirExists),
+      "home-validation: a real existing temp dir (the HOME=$(mktemp -d) sandbox) is accepted")
+try? FileManager.default.removeItem(atPath: sandboxHome)
+
+// theme-add classification (pure: id vs https url vs refused).
+check(ThemeAdd.classify("critter") == .catalogID("critter"), "cli-theme-add: a bare id classifies as a catalog id")
+check(ThemeAdd.classify("https://example.com/x.zip") == .directURL("https://example.com/x.zip"),
+      "cli-theme-add: an https url classifies as a direct download")
+check(ThemeAdd.classify("http://example.com/x.zip") == nil, "cli-theme-add: a plaintext http url is refused")
+check(ThemeAdd.classify("file:///etc/passwd") == nil, "cli-theme-add: a file:// url is refused (no id fallback)")
+check(ThemeAdd.classify("..") == nil, "cli-theme-add: an unsafe id ('..') is refused")
+check(ThemeAdd.classify("a/b") == nil, "cli-theme-add: an id with a separator is refused")
+// The self-verifying entry for a direct-url add has size/sha == the downloaded bytes (so the shared
+// installer's integrity verify is a tautology — every OTHER gate still runs unchanged).
+let cliBlob = Data("theme-bytes".utf8)
+let cliEntry = ThemeAdd.selfVerifyingEntry(id: "mytheme", url: "https://example.com/x.zip", data: cliBlob)
+check(cliEntry.id == "mytheme" && cliEntry.sizeBytes == cliBlob.count
+      && cliEntry.sha256 == ThemeCatalogEntry.sha256Hex(cliBlob),
+      "cli-theme-add: self-verifying entry's size+sha match the downloaded bytes")
+check(cliEntry.verify(cliBlob) == nil, "cli-theme-add: the self-verifying entry passes the shared integrity verify on its own bytes")
+check(cliEntry.verify(Data("tampered".utf8)) != nil, "cli-theme-add: a different blob still fails the shared verify")
+
+// =====================================================================================
+// Multi-agent providers: SessionProvider abstraction + OpenCode (Codex deferred — seam only).
+// =====================================================================================
+
+// --- Provider badge / kind (drives the small per-row tag distinguishing OpenCode from Claude) ---
+check(SessionProviderKind.claude.badge == "C" && SessionProviderKind.opencode.badge == "OC",
+      "provider: badge glyphs (C / OC)")
+
+// --- ClaudeCodeProvider parity: the extracted pure mapping must equal composing the original seams
+//     (StateEngine + Rollup + the >10-min waiting→idle downgrade + TranscriptDigest). This is the
+//     regression guard that refactoring Claude behind the protocol changed NO behavior. ---
+let claudeNow = Date(timeIntervalSince1970: 1_700_000_000)
+func claudeOldStyle(lines: [String], subStatuses: [AgentStatus], mtime: Date, now: Date) -> AgentStatus {
+    let records = TranscriptAdapter.parse(lines: lines)
+    let s = StateEngine.deriveStatus(records: records, openPermission: false, lastActivity: mtime, now: now)
+    var rolled = Rollup.rollUp(session: s, subAgents: subStatuses)
+    if case .waitingForInput = rolled, now.timeIntervalSince(mtime) > 600 { rolled = .finished(.success) }
+    return rolled
+}
+// (a) a stopped text-tail, just touched → working (mid-turn preamble), matches old logic.
+let claudeLinesWorking = [
+    #"{"type":"user","cwd":"/Users/x/projects/repo-a","message":{"content":"hi"}}"#,
+    #"{"type":"assistant","message":{"id":"m1","content":[{"type":"text"}],"usage":{"input_tokens":10,"output_tokens":5}},"timestamp":"2023-11-14T22:00:00.000Z"}"#,
+]
+let claudeWorking = ClaudeCodeProvider.session(lines: claudeLinesWorking, fullID: "sess-a", mtime: claudeNow,
+                                               subDigests: [], now: claudeNow.addingTimeInterval(3))
+check(claudeWorking.status == claudeOldStyle(lines: claudeLinesWorking, subStatuses: [], mtime: claudeNow, now: claudeNow.addingTimeInterval(3)),
+      "ClaudeCodeProvider: recent text-tail status matches old inline logic (working)")
+check(claudeWorking.provider == .claude, "ClaudeCodeProvider: provider kind tagged .claude")
+check(claudeWorking.label == "repo-a", "ClaudeCodeProvider: label from transcript cwd lastPathComponent")
+check(claudeWorking.tokens == TranscriptDigest.scan(lines: claudeLinesWorking).tokens && claudeWorking.tokens > 0,
+      "ClaudeCodeProvider: token figure == TranscriptDigest.scan")
+// (b) a stopped text-tail gone quiet past the idle window → finished/idle downgrade, matches old logic.
+let claudeStale = ClaudeCodeProvider.session(lines: claudeLinesWorking, fullID: "sess-a", mtime: claudeNow,
+                                             subDigests: [], now: claudeNow.addingTimeInterval(900))
+check(claudeStale.status == .finished(.success)
+      && claudeStale.status == claudeOldStyle(lines: claudeLinesWorking, subStatuses: [], mtime: claudeNow, now: claudeNow.addingTimeInterval(900)),
+      "ClaudeCodeProvider: waiting→idle downgrade past 10min matches old logic")
+// (c) a waiting text-tail BEFORE the idle window stays waiting (not yet downgraded).
+let claudeWaiting = ClaudeCodeProvider.session(lines: claudeLinesWorking, fullID: "sess-a", mtime: claudeNow,
+                                               subDigests: [], now: claudeNow.addingTimeInterval(120))
+check(claudeWaiting.status == .waitingForInput(.stoppedTurn)
+      && claudeWaiting.status == claudeOldStyle(lines: claudeLinesWorking, subStatuses: [], mtime: claudeNow, now: claudeNow.addingTimeInterval(120)),
+      "ClaudeCodeProvider: stopped turn pre-idle stays waiting, matches old logic")
+// (d) sub-agent rollup precedence preserved. A trailing tool_use makes the SESSION itself working;
+//     rolling in a finished sub-agent keeps it working (Rollup: any working ⇒ working) — and the
+//     idle downgrade can't fire because the rolled status isn't a wait. Identical to the old logic.
+let claudeToolUse = [
+    #"{"type":"user","cwd":"/Users/x/projects/repo-a","message":{"content":"hi"}}"#,
+    #"{"type":"assistant","message":{"id":"m1","content":[{"type":"text"},{"type":"tool_use"}]}}"#,
+]
+let claudeRolled = ClaudeCodeProvider.session(lines: claudeToolUse, fullID: "sess-a", mtime: claudeNow,
+        subDigests: [SubagentDigest(name: "t", status: .finished(.success), tokens: 0, durationSeconds: nil)],
+        now: claudeNow.addingTimeInterval(900))
+check(claudeRolled.status == .working
+      && claudeRolled.status == claudeOldStyle(lines: claudeToolUse, subStatuses: [.finished(.success)], mtime: claudeNow, now: claudeNow.addingTimeInterval(900)),
+      "ClaudeCodeProvider: working session + finished sub-agent stays working (Rollup preserved)")
+// (e) discovery against a real on-disk projects dir: a fresh transcript is found, an old one filtered.
+let claudeProjRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-claude-\(getpid())-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: claudeProjRoot, withIntermediateDirectories: true)
+fixtureWorkDirs.append(claudeProjRoot)
+let claudeProjDir = claudeProjRoot.appendingPathComponent("-Users-x-projects-repo-a")
+try? FileManager.default.createDirectory(at: claudeProjDir, withIntermediateDirectories: true)
+let claudeFresh = claudeProjDir.appendingPathComponent("sess-fresh.jsonl")
+try? claudeLinesWorking.joined(separator: "\n").write(to: claudeFresh, atomically: true, encoding: .utf8)
+let claudeOld = claudeProjDir.appendingPathComponent("sess-old.jsonl")
+try? claudeLinesWorking.joined(separator: "\n").write(to: claudeOld, atomically: true, encoding: .utf8)
+// Backdate the "old" transcript past the 30-min active window so discovery filters it out.
+try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: claudeOld.path)
+let claudeDiscovered = ClaudeCodeProvider(projectsDir: claudeProjRoot.path).poll(now: Date())
+check(claudeDiscovered.map(\.fullID) == ["sess-fresh"],
+      "ClaudeCodeProvider: discovery finds the fresh transcript, filters the >30-min-old one")
+check(ClaudeCodeProvider(projectsDir: "/no/such/projects/dir").poll() == [],
+      "ClaudeCodeProvider: an absent projects dir yields no sessions (never crashes)")
+
+// --- OpenCode message.data JSON → typed struct (parse fixtures, grounded in real db data) ---
+let ocAssistant = #"""
+{"role":"assistant","finish":"tool-calls","time":{"created":1771229252576,"completed":1771229407719},"tokens":{"total":35400,"input":2089,"output":243,"reasoning":90,"cache":{"read":33068,"write":0}},"path":{"cwd":"/Users/x/projects/svc"}}
+"""#
+let ocMsg = OpenCodeMessage.parse(ocAssistant)
+check(ocMsg?.role == "assistant" && ocMsg?.isAssistant == true, "OpenCode parse: role=assistant")
+check(ocMsg?.createdMs == 1771229252576 && ocMsg?.completedMs == 1771229407719,
+      "OpenCode parse: time.created/completed (large ms as Double coerced to Int)")
+check(ocMsg?.tokensTotal == 35400, "OpenCode parse: tokens.total extracted")
+check(ocMsg?.finish == "tool-calls", "OpenCode parse: finish extracted")
+check(ocMsg?.cwd == "/Users/x/projects/svc", "OpenCode parse: path.cwd extracted")
+let ocUser = #"{"role":"user","time":{"created":1771229162313}}"#
+let ocUserMsg = OpenCodeMessage.parse(ocUser)
+check(ocUserMsg?.role == "user" && ocUserMsg?.completedMs == nil && ocUserMsg?.tokensTotal == nil && ocUserMsg?.isAssistant == false,
+      "OpenCode parse: a user message has no completed/tokens")
+check(OpenCodeMessage.parse("not json") == nil && OpenCodeMessage.parse("") == nil,
+      "OpenCode parse: garbage / empty → nil")
+check(OpenCodeMessage.parse(#"{"time":{"created":1}}"#) == nil, "OpenCode parse: a blob with no role → nil")
+
+// --- OpenCode state mapping (poll-style; mirrors the Claude recency approach). now-anchored. ---
+let ocNow = Date(timeIntervalSince1970: 1_771_229_500)   // just after the real-data timestamps above
+func ms(_ secondsBeforeNow: Double) -> Int { Int((ocNow.timeIntervalSince1970 - secondsBeforeNow) * 1000) }
+func upd(_ secondsBeforeNow: Double) -> Date { ocNow.addingTimeInterval(-secondsBeforeNow) }
+// (1) assistant streaming (no completed) + recent → working.
+let ocStreaming = [OpenCodeMessage(role: "assistant", createdMs: ms(5), completedMs: nil, tokensTotal: 1200, finish: nil)]
+check(OpenCodeState.deriveStatus(messages: ocStreaming, lastUpdated: upd(3), now: ocNow) == .working,
+      "OpenCode state: streaming turn (no completed) → working")
+// (2) assistant finished on the tool-loop finish, recent → still working (mid-loop, like Claude's tool_use tail).
+let ocToolLoop = [OpenCodeMessage(role: "assistant", createdMs: ms(60), completedMs: ms(20), tokensTotal: 35400, finish: "tool-calls")]
+check(OpenCodeState.deriveStatus(messages: ocToolLoop, lastUpdated: upd(8), now: ocNow) == .working,
+      "OpenCode state: finish=tool-calls + recent → working (mid tool-loop)")
+// (3) terminal finish, idle within the wait window → waiting on the developer.
+let ocTerminal = [OpenCodeMessage(role: "assistant", createdMs: ms(120), completedMs: ms(60), tokensTotal: 9000, finish: "stop")]
+check(OpenCodeState.deriveStatus(messages: ocTerminal, lastUpdated: upd(60), now: ocNow) == .waitingForInput(.stoppedTurn),
+      "OpenCode state: terminal finish + idle (within wait window) → waiting(stoppedTurn)")
+// (4) terminal finish gone quiet past the idle window → finished/idle (downgrade, mirrors Claude poll).
+check(OpenCodeState.deriveStatus(messages: ocTerminal, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: terminal finish quiet >10min → finished/idle")
+// (5) tool-loop turn gone cold past idle → no longer looping → finished/idle.
+check(OpenCodeState.deriveStatus(messages: ocToolLoop, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: tool-loop gone cold past idle → finished/idle")
+// (6) streaming turn gone cold past idle (crashed/abandoned partial) → finished/idle, not stuck working.
+check(OpenCodeState.deriveStatus(messages: ocStreaming, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: streaming gone cold past idle → finished/idle (not stuck working)")
+// (7) a bare user message last (no assistant reply yet) → working (agent is processing).
+let ocUserLast = [OpenCodeMessage(role: "user", createdMs: ms(2))]
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: upd(2), now: ocNow) == .working,
+      "OpenCode state: user message last → working")
+// (8) no usable messages → working (spinning up).
+check(OpenCodeState.deriveStatus(messages: [], lastUpdated: upd(1), now: ocNow) == .working,
+      "OpenCode state: empty messages → working")
+// (9) terminal finish, very recent (within working window) → working (brief mid-turn lull).
+check(OpenCodeState.deriveStatus(messages: ocTerminal, lastUpdated: upd(5), now: ocNow) == .working,
+      "OpenCode state: terminal finish but very recent (<window) → working")
+// (10) PHANTOM-WORKING regression: a STALE user-last session (quiet past the idle window) must
+//      DOWNGRADE to finished/idle, NOT pin .working forever. Pre-fix this returned .working
+//      unconditionally (the unconditional user-last branch), pinning a stale row → defeats the
+//      keep-awake sleep assertion with no way to dismiss it. (FAILS before the recency gate.)
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: STALE user-last (quiet past idle) → finished/idle, NOT phantom-working")
+// (11) PHANTOM-WORKING regression: a STALE empty session (no usable messages, quiet past the idle
+//      window) must DOWNGRADE too. Pre-fix the empty-messages branch returned .working
+//      unconditionally — a session that never produced a message would pin .working forever.
+check(OpenCodeState.deriveStatus(messages: [], lastUpdated: upd(900), now: ocNow) == .finished(.success),
+      "OpenCode state: STALE empty session (quiet past idle) → finished/idle, NOT phantom-working")
+// (12) the FRESH counterparts still read as working (the gate only fires past the idle window).
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: upd(2), now: ocNow) == .working
+      && OpenCodeState.deriveStatus(messages: [], lastUpdated: upd(2), now: ocNow) == .working,
+      "OpenCode state: FRESH user-last / empty session still → working (gate fires only past idle)")
+// (13) a nil time_updated is treated conservatively as stale → finished/idle, not pinned working.
+check(OpenCodeState.deriveStatus(messages: ocUserLast, lastUpdated: nil, now: ocNow) == .finished(.success)
+      && OpenCodeState.deriveStatus(messages: [], lastUpdated: nil, now: ocNow) == .finished(.success),
+      "OpenCode state: missing time_updated treated as stale → finished/idle (conservative)")
+
+// --- OpenCode token extraction: latest assistant tokens.total (NOT summed). ---
+let ocTokMsgs = [
+    OpenCodeMessage(role: "user"),
+    OpenCodeMessage(role: "assistant", tokensTotal: 1000, finish: "tool-calls"),
+    OpenCodeMessage(role: "assistant", tokensTotal: 35400, finish: "tool-calls"),   // latest assistant
+]
+check(OpenCodeState.tokens(messages: ocTokMsgs) == 35400, "OpenCode tokens: latest assistant tokens.total (not summed)")
+check(OpenCodeState.tokens(messages: [OpenCodeMessage(role: "user")]) == 0, "OpenCode tokens: no assistant tokens → 0")
+
+// --- OpenCodeStore row → ProviderSession mapping (pure; archived excluded, sub-session excluded) ---
+let ocRowTop = OpenCodeStore.SessionRow(
+    id: "ses_top", parentID: nil, directory: "/Users/x/projects/svc-dir", title: "Refactor journey",
+    timeCreatedMs: ms(300), timeUpdatedMs: ms(60), timeArchivedMs: nil,
+    messages: [OpenCodeMessage(role: "assistant", createdMs: ms(120), completedMs: ms(60), tokensTotal: 35400, finish: "stop")])
+let ocRowSub = OpenCodeStore.SessionRow(
+    id: "ses_sub", parentID: "ses_top", directory: "/Users/x/projects/svc-dir", title: "sub task",
+    timeCreatedMs: ms(120), timeUpdatedMs: ms(60), timeArchivedMs: nil, messages: [])
+let ocRowArchived = OpenCodeStore.SessionRow(
+    id: "ses_arch", parentID: nil, directory: "/Users/x/projects/old", title: "Old",
+    timeCreatedMs: ms(9000), timeUpdatedMs: ms(8000), timeArchivedMs: ms(7000), messages: [])
+let ocMapped = OpenCodeStore.sessions(from: [ocRowTop, ocRowSub, ocRowArchived], now: ocNow)
+check(ocMapped.map(\.fullID) == ["ses_top"],
+      "OpenCodeStore: only top-level non-archived session becomes a row (sub-session + archived excluded)")
+// RECENCY drop: a non-archived top-level row whose time_updated is older than the activeWindow
+// (1800s) is DROPPED (mirroring the Claude poll path's discovery filter — no permanent phantom row),
+// while a freshly-updated sibling is KEPT. A row with NO time_updated is dropped (conservative).
+let ocRowStale = OpenCodeStore.SessionRow(
+    id: "ses_stale", parentID: nil, directory: "/Users/x/projects/stale-dir", title: "Stale work",
+    timeCreatedMs: ms(9000), timeUpdatedMs: ms(2000), timeArchivedMs: nil,   // updated 2000s ago > 1800s window
+    messages: [OpenCodeMessage(role: "user", createdMs: ms(2000))])
+let ocRowNoUpdated = OpenCodeStore.SessionRow(
+    id: "ses_noupd", parentID: nil, directory: "/Users/x/projects/noupd-dir", title: "No timestamp",
+    timeCreatedMs: ms(9000), timeUpdatedMs: nil, timeArchivedMs: nil, messages: [])
+let ocRecencyMapped = OpenCodeStore.sessions(from: [ocRowTop, ocRowStale, ocRowNoUpdated], now: ocNow)
+check(ocRecencyMapped.map(\.fullID) == ["ses_top"],
+      "OpenCodeStore.sessions(from:): DROPS a top-level row older than the activeWindow (and one with no time_updated), KEEPS the fresh one")
+check(ocMapped.first?.provider == .opencode, "OpenCodeStore: mapped session tagged .opencode")
+check(ocMapped.first?.label == "svc-dir", "OpenCodeStore: label = directory lastPathComponent")
+check(ocMapped.first?.title == "Refactor journey", "OpenCodeStore: title from session.title")
+check(ocMapped.first?.tokens == 35400, "OpenCodeStore: tokens from latest assistant tokens.total")
+check(ocMapped.first?.status == .waitingForInput(.stoppedTurn), "OpenCodeStore: terminal+idle → waiting (via OpenCodeState)")
+// title falls back to nil when blank → the App uses the label instead.
+let ocBlankTitle = OpenCodeStore.providerSession(from: OpenCodeStore.SessionRow(
+    id: "s", parentID: nil, directory: "/a/b/proj", title: "   ", timeCreatedMs: nil, timeUpdatedMs: nil,
+    timeArchivedMs: nil, messages: []), now: ocNow)
+check(ocBlankTitle.title == nil && ocBlankTitle.label == "proj",
+      "OpenCodeStore: blank title → nil; label falls back to dir name")
+
+// --- OpenCodeStore graceful failure: absent / non-db file → no sessions, never crashes ---
+check(OpenCodeStore.readSessions(path: "/no/such/opencode.db") == [],
+      "OpenCodeStore: absent db file → [] (no crash)")
+let ocGarbageDB = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-ocgarbage-\(getpid())-\(UUID().uuidString).db")
+try? Data("this is not a sqlite database".utf8).write(to: ocGarbageDB)
+fixtureWorkDirs.append(ocGarbageDB)
+check(OpenCodeStore.readSessions(path: ocGarbageDB.path) == [],
+      "OpenCodeStore: a non-sqlite file → [] (open/prepare fails gracefully)")
+check(OpenCodeProvider(dbPath: "/no/such/opencode.db").poll() == [],
+      "OpenCodeProvider: absent db → no sessions")
+
+// --- OpenCodeStore live SQLite read against a TINY fixture db with the REAL schema + rows ---
+//     (built in a temp dir; the real ~/.local/share/opencode/opencode.db is NEVER written.) ---
+let ocFixtureDB = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-ocfixture-\(getpid())-\(UUID().uuidString).db")
+fixtureWorkDirs.append(ocFixtureDB)
+func ocBuildFixtureDB(at path: String) -> Bool {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+        sqlite3_close(db); return false
+    }
+    defer { sqlite3_close(db) }
+    // Confirmed-schema subset (the columns the reader selects); NOT NULL/PK mirror the real db.
+    let schema = """
+    CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+        slug TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+    """
+    guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else { return false }
+    func exec(_ sql: String) -> Bool { sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK }
+    // One top-level session (terminal finish, idle) + one archived + one sub-session.
+    let tCreated = ms(300), tUpdated = ms(60)
+    let dataJSON = #"{"role":"assistant","finish":"stop","time":{"created":1,"completed":2},"tokens":{"total":12345},"path":{"cwd":"/x"}}"#
+        .replacingOccurrences(of: "'", with: "''")
+    var ok = exec("INSERT INTO session VALUES ('ses_live','prj',NULL,'slug','/Users/x/projects/live-repo','Live title','v1',\(tCreated),\(tUpdated),NULL);")
+    ok = ok && exec("INSERT INTO session VALUES ('ses_arch','prj',NULL,'slug','/x/old','Old','v1',\(ms(9000)),\(ms(8000)),\(ms(7000)));")
+    ok = ok && exec("INSERT INTO session VALUES ('ses_sub','prj','ses_live','slug','/x/live','Sub','v1',\(ms(120)),\(ms(60)),NULL);")
+    ok = ok && exec("INSERT INTO message VALUES ('msg1','ses_live',\(ms(120)),\(ms(60)),'\(dataJSON)');")
+    return ok
+}
+check(ocBuildFixtureDB(at: ocFixtureDB.path), "OpenCodeStore fixture: built a temp db with the real schema + rows")
+// `now: ocNow` so the SQL recency cutoff is anchored to the fixture's timestamps (which are built
+// relative to ocNow), not the wall clock. The fresh top-level row + the archived & sub rows are all
+// read (archived/sub are kept by the WHERE regardless of recency; sessions(from:) excludes them).
+let ocLiveRows = OpenCodeStore.readSessions(path: ocFixtureDB.path, now: ocNow)
+check(ocLiveRows.count == 3, "OpenCodeStore fixture: read all 3 session rows from SQLite")
+check(ocLiveRows.first(where: { $0.id == "ses_live" })?.messages.first?.tokensTotal == 12345,
+      "OpenCodeStore fixture: message.data JSON parsed off the live db (tokens.total)")
+check(ocLiveRows.first(where: { $0.id == "ses_sub" })?.isSubSession == true,
+      "OpenCodeStore fixture: parent_id set → isSubSession")
+check(ocLiveRows.first(where: { $0.id == "ses_arch" })?.isArchived == true,
+      "OpenCodeStore fixture: time_archived set → isArchived")
+let ocLiveSessions = OpenCodeStore.sessions(from: ocLiveRows, now: ocNow)
+check(ocLiveSessions.map(\.fullID) == ["ses_live"],
+      "OpenCodeStore fixture: end-to-end read+map yields only the live top-level session")
+check(ocLiveSessions.first?.label == "live-repo" && ocLiveSessions.first?.tokens == 12345
+      && ocLiveSessions.first?.provider == .opencode,
+      "OpenCodeStore fixture: mapped session has dir label, tokens, .opencode kind")
+// The whole provider end-to-end (poll → read → map) against the fixture db.
+check(OpenCodeProvider(dbPath: ocFixtureDB.path).poll(now: ocNow).map(\.fullID) == ["ses_live"],
+      "OpenCodeProvider: poll() against the fixture db yields the live session")
+
+// --- OpenCodeStore SQL-level recency cutoff: a STALE top-level row is dropped IN THE SQL READ (not
+//     just the pure mapping), so the per-poll read of sessions+messages is bounded by recency. Build
+//     a second fixture with a fresh AND a stale top-level row + a stale message on each. ---
+let ocRecencyDB = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("ai-ocrecency-\(getpid())-\(UUID().uuidString).db")
+fixtureWorkDirs.append(ocRecencyDB)
+func ocBuildRecencyDB(at path: String) -> Bool {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+        sqlite3_close(db); return false
+    }
+    defer { sqlite3_close(db) }
+    let schema = """
+    CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+        slug TEXT NOT NULL, directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_archived INTEGER);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+    """
+    guard sqlite3_exec(db, schema, nil, nil, nil) == SQLITE_OK else { return false }
+    func exec(_ sql: String) -> Bool { sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK }
+    let assistantData = #"{"role":"assistant","finish":"stop","time":{"created":1,"completed":2},"tokens":{"total":7}}"#
+    // fresh: updated 60s ago (< 1800s window). stale: updated 2000s ago (> window).
+    var ok = exec("INSERT INTO session VALUES ('ses_fresh','prj',NULL,'slug','/x/fresh','Fresh','v1',\(ms(300)),\(ms(60)),NULL);")
+    ok = ok && exec("INSERT INTO session VALUES ('ses_old','prj',NULL,'slug','/x/old','Old','v1',\(ms(9000)),\(ms(2000)),NULL);")
+    ok = ok && exec("INSERT INTO message VALUES ('mf','ses_fresh',\(ms(120)),\(ms(60)),'\(assistantData)');")
+    ok = ok && exec("INSERT INTO message VALUES ('mo','ses_old',\(ms(9000)),\(ms(2000)),'\(assistantData)');")
+    return ok
+}
+check(ocBuildRecencyDB(at: ocRecencyDB.path), "OpenCodeStore recency fixture: built a temp db with a fresh + a stale top-level row")
+let ocRecencyRows = OpenCodeStore.readSessions(path: ocRecencyDB.path, now: ocNow)
+check(ocRecencyRows.map(\.id).sorted() == ["ses_fresh"],
+      "OpenCodeStore: SQL read DROPS the stale top-level row (time_updated < cutoff), KEEPS the fresh one")
+check(ocRecencyRows.first?.messages.count == 1,
+      "OpenCodeStore: messages are only read for the kept (fresh) session, not the dropped stale one")
+check(OpenCodeProvider(dbPath: ocRecencyDB.path).poll(now: ocNow).map(\.fullID) == ["ses_fresh"],
+      "OpenCodeProvider: poll() drops the stale top-level session end-to-end")
+
+// --- Daemon-fresh merge: OpenCode poll rows must appear ALONGSIDE the Claude daemon rows WITHOUT
+//     perturbing the daemon rows' relative order. SessionMergeOrder is the exact rule the App's
+//     activeSessions() daemon-fresh branch uses (priority asc, then lastActivity desc, STABLE). We
+//     model the merge over ProviderSession (daemon rows carry no lastActivity → nil). ---
+func pSess(_ id: String, _ status: AgentStatus, _ last: Date?, _ prov: SessionProviderKind = .claude) -> ProviderSession {
+    ProviderSession(provider: prov, fullID: id, label: id, title: nil, status: status, tokens: 0,
+                    startedAt: nil, lastActivity: last)
+}
+// Daemon rows (Claude), nil lastActivity, in their authoritative (sessionID-sorted) order. Two are
+// waiting (rank 1, higher priority), one working (rank 3). OpenCode rows have real lastActivity.
+// Ranks: waiting(stoppedTurn)=1, working=3 (waiting is HIGHER priority / sorts first).
+let daemonRows = [
+    pSess("c-a", .waitingForInput(.stoppedTurn), nil),
+    pSess("c-b", .working, nil),
+    pSess("c-c", .waitingForInput(.stoppedTurn), nil),
+]
+let ocMergeRows = [
+    pSess("oc-work", .working, ocNow.addingTimeInterval(-5), .opencode),
+    pSess("oc-wait", .waitingForInput(.stoppedTurn), ocNow.addingTimeInterval(-5), .opencode),
+]
+let mergedOrder = SessionMergeOrder.ordered(daemonRows + ocMergeRows, status: \.status, lastActivity: \.lastActivity)
+// OpenCode rows are PRESENT in the merged list — i.e. visible alongside the daemon rows (the LOW fix).
+check(Set(mergedOrder.map(\.fullID)) == ["c-a", "c-b", "c-c", "oc-work", "oc-wait"],
+      "SessionMergeOrder: all daemon + OpenCode rows present after merge (OpenCode visible in daemon mode)")
+// The Claude daemon rows preserve their RELATIVE order WITHIN a priority rank (the stability
+// guarantee): both waiting daemon rows tie on rank+nil-activity, so c-a stays before c-c — not
+// perturbed by the merge. This is the "daemon order not disturbed" invariant.
+let daemonWaitsOrder = mergedOrder.filter { $0.provider == .claude && DisplayPriority.rank($0.status) == 1 }.map(\.fullID)
+check(daemonWaitsOrder == ["c-a", "c-c"],
+      "SessionMergeOrder: equal-rank daemon rows keep their relative order (stable — c-a before c-c)")
+// Full order via the standard comparator (rank asc, then lastActivity desc, stable on ties):
+//   rank 1 (waiting): oc-wait (fresh) > c-a > c-c (both nil, stable). rank 3 (working): oc-work > c-b.
+check(mergedOrder.map(\.fullID) == ["oc-wait", "c-a", "c-c", "oc-work", "c-b"],
+      "SessionMergeOrder: priority asc then recency desc; fresh OpenCode rows sort above nil-activity daemon rows within a rank")
+
+// Tidy up every fixture / install-root / scratch dir built above. (Top-level `defer` would be skipped
+// by the `exit()` below, so cleanup is explicit — matching the SettingsFile temp-dir teardown earlier.)
+for dir in fixtureWorkDirs { try? FileManager.default.removeItem(at: dir) }
 
 print("")
 if failures == 0 {

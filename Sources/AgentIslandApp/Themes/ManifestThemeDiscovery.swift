@@ -8,8 +8,11 @@ import AgentIslandThemes
 // Every manifest passes through the strict, path-safe loader; a rejected/unreadable folder is
 // skipped (and logged), never fatal — a single broken data theme must not take down the code themes.
 
-/// Best-effort app version for `minAppVersion` gating. A build-stamped version is the job of the
-/// `update-available-indicator` backlog; until then this constant is the single source of truth.
+/// The running app's version — used both for `minAppVersion` theme gating and the "update available"
+/// indicator (compared against the latest GitHub release). A packaged `.app` reports its real value:
+/// `Scripts/build-app.sh` stamps `CFBundleShortVersionString` from its `VERSION` constant (the single
+/// source of truth). The `"0.3.0"` fallback is what a bare `swift run AgentIslandApp` (no bundle plist)
+/// reports — keep it in lockstep with that `VERSION`.
 enum AppInfo {
     static let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.3.0"
 }

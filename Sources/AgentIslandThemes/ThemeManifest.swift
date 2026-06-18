@@ -129,6 +129,24 @@ public enum SemVer {
         return true   // equal
     }
 
+    /// True iff `version` is STRICTLY greater than `other` (component-wise). The "update available =
+    /// latest > installed" half that `isAtLeast` can't express (`isAtLeast` is true on equal). A
+    /// nil/blank `other` makes any non-empty `version` "newer" (an unknown baseline can always be
+    /// improved on); a nil/blank `version` is never newer.
+    public static func isNewer(_ version: String, than other: String?) -> Bool {
+        let a = components(version)
+        guard !a.isEmpty else { return false }   // a blank/component-less version is never "newer"
+        guard let other = other, !other.isEmpty else { return true }   // any version beats an unknown baseline
+        let b = components(other)
+        let n = max(a.count, b.count)
+        for i in 0..<n {
+            let x = i < a.count ? a[i] : 0
+            let y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false   // equal → not strictly newer
+    }
+
     private static func components(_ s: String) -> [Int] {
         s.split(separator: ".").map { part in
             // take the leading integer run ("3rc1" → 3, "" → 0)

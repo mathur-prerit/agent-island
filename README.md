@@ -14,6 +14,14 @@ A quirky, quiet, always-on-top macOS status **island** that watches your Claude 
 
 Gatekeeper's "unidentified developer" warning only affects *downloaded, unsigned* apps — building locally avoids it entirely, so **no Apple ID, code-signing, or notarization is involved**. Pick whichever fits you:
 
+### Option 0 — One-line installer (builds from source)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mathur-prerit/agent-island/main/install.sh | sh
+```
+
+This **builds from source** (there are no pre-built binary releases yet — it's honest about that): it clones the repo to a temp dir, builds the `.app` + daemon + both CLIs via `Scripts/build-app.sh`, copies `AgentIsland.app` to `/Applications`, installs the `agentisland` and `agentisland-hook` binaries to `/usr/local/bin` (set `AGENT_ISLAND_BIN_DIR` to override), and wires the Claude Code lifecycle hooks (backup + atomic write). Run interactively, it also offers to enable start-on-boot. It's **idempotent** — re-run it to upgrade. Requires `git` and `swift` (Xcode or the Command Line Tools). Reverse everything with `agentisland uninstall`.
+
 ### Option A — Run from source (quickest)
 
 ```sh
@@ -33,7 +41,9 @@ open build/AgentIsland.app          # opens with no warning — you built it loc
 
 To keep it around: drag `build/AgentIsland.app` into `/Applications`, then add it under **System Settings ▸ General ▸ Login Items** to launch it at login.
 
-### Option C — Homebrew (build-from-source)
+### Option C — Homebrew (build-from-source) — *planned*
+
+A `Formula/agent-island.rb` is checked in, but the Homebrew tap isn't published yet, so this is **aspirational** for now — use Option 0 or B. Once the tap lands:
 
 ```sh
 brew tap mathur-prerit/agent-island https://github.com/mathur-prerit/agent-island
@@ -62,6 +72,36 @@ swift run agentislandd
 
 With the daemon running, the app reads its `~/.agent-island/state.json` instead of polling; if the daemon isn't running, the app automatically falls back to polling. Remove the hooks anytime with `swift run AgentIslandHookCLI uninstall`.
 
+## Management CLI — `agentisland`
+
+The one-line installer puts an `agentisland` binary on your PATH (or build + run it directly with `swift run agentisland …`). It manages themes, preferences, updates, start-on-boot, and uninstall. Run `agentisland --help` for the full list. Every subcommand:
+
+```sh
+agentisland theme list                # installed + bundled + downloadable themes (* = active)
+agentisland theme add <id>            # download + install a theme by its catalog id
+agentisland theme add <https-url>     # …or install directly from an https zip url
+agentisland theme set <id>            # make <id> the active theme
+
+agentisland config                    # list the settable preferences + current values
+agentisland config get <key>          # print one preference's value
+agentisland config set <key> <value>  # set one preference (validated against an allowlist)
+
+agentisland update                    # check for a newer release; offer to update in place
+agentisland start-on-boot [on|off|status]   # launch agent-island at login (login item)
+agentisland uninstall [--yes] [--dry-run]    # remove hooks, login item, ~/.agent-island, and the app
+agentisland version                   # print the CLI version
+```
+
+Notes that keep it honest:
+
+- **`config`** reads and writes the **app's own preferences domain** (`com.mathur-prerit.agentisland`), so a `config set` is exactly what the running app reads — restart agent-island to pick up a change. Settable keys: `islandTheme`, `soundEnabled`, `soundCueSet` (`theme`|`default`), `islandKeepAwake`, and `eventDrivenSetupDecision` (`enabled`|`declined`|`error`). Unknown keys and off-allowlist values are refused.
+- **`theme add`** downloads over **https only** and runs the *same* validate-then-install pipeline the app's menu uses — integrity check → zip-bomb / zip-slip / symlink inspection → sandboxed extraction → strict manifest validation → atomic install. A bad archive is rejected with no partial install left behind. Catalog ids carry a published SHA-256/size; a raw `https` url is installed as-is (its bytes are its own integrity claim).
+- **`update`** compares your installed version against the latest GitHub release; if newer, it offers to re-run the from-source installer in place (or, non-interactively, prints the one-liner). No silent self-mutation.
+- **`start-on-boot`** uses macOS 13+ `SMAppService` to register the **app** as a login item (the daemon follows the app — there's no separate LaunchAgent). A bare `start-on-boot` just reports status. Because the CLI binary isn't itself the app bundle, on/off also print the manual fallback (System Settings ▸ General ▸ Login Items) in case the automatic toggle doesn't take.
+- **`uninstall`** reverses the hooks (preserving any non-agent-island hooks and your other settings), unregisters the login item, and removes `~/.agent-island` and the `.app`. It **confirms first** (skip with `--yes`); `--dry-run` prints exactly what it would do and changes nothing.
+
+> No Homebrew tap or binary releases yet — everything above is build-from-source. A signed binary release + a real Homebrew tap are future work.
+
 ## How it works
 
 No Claude Code hook cleanly separates "waiting for input" from "finished" (`Stop` fires for both). agent-island derives state from the session transcript: it reads the **last conversational record** (skipping metadata records like `ai-title` / `permission-mode`), where a trailing assistant `tool_use` block means *working* and a stopped turn means *waiting for you*; an open permission prompt is an explicit block; `SessionEnd` / quit / staleness means *finished*. Sub-agents are read from `<session-uuid>/subagents/**/agent-*.jsonl`. All of this was verified against real `~/.claude` transcripts — see [`spike/FINDINGS.md`](spike/FINDINGS.md).
@@ -82,9 +122,11 @@ swift run AgentIslandDemo       # the engine on your real ~/.claude transcripts
 - `Sources/HookInstall` — safe `settings.json` merge for the hook installer
 - `Sources/AgentIslandApp` — the menu-bar + floating-island AppKit app
 - `Sources/AgentIslandHookCLI` (`agentisland-hook`) — install/uninstall hooks + relay events
+- `Sources/AgentIsland` (`agentisland`) — the user-facing management CLI (theme/config/update/uninstall/start-on-boot)
+- `Sources/AgentIslandCLICore` — the CLI's pure, testable logic (arg parsing, config allowlist, uninstall plan)
 - `Sources/agentislandd` — the background daemon
 - `Sources/AgentIslandDemo`, `Sources/AgentIslandSelfTest` — console demo + framework-free tests
-- `Scripts/build-app.sh`, `Formula/agent-island.rb`, `launchd/` — distribution
+- `install.sh`, `Scripts/build-app.sh`, `Formula/agent-island.rb`, `launchd/` — distribution
 - `spike/FINDINGS.md` — seam-verification findings (the integration-risk gate)
 
 ## License

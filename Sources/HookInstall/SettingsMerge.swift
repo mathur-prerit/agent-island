@@ -80,11 +80,18 @@ public enum SettingsMerge {
         }
     }
 
-    /// Recognise an agent-island relay hook regardless of quoting or the exact binary path.
-    /// The app installs `"<abs path>/AgentIslandHookCLI" relay` (quoted) while the CLI installs
-    /// `<argv0>/AgentIslandHookCLI relay` (unquoted); both reduce to this stable signature.
+    /// Recognise an agent-island relay hook regardless of quoting or the exact binary name/path.
+    /// Two install paths produce two binary names:
+    ///   • the app installs `"<abs path>/AgentIslandHookCLI" relay` (quoted, app target name), and
+    ///   • the `curl|sh` installer installs the binary as `agentisland-hook` and wires it via
+    ///     `agentisland-hook install`, whose argv[0]-derived command is `agentisland-hook relay`
+    ///     (or `/usr/local/bin/agentisland-hook relay`).
+    /// Both reduce to a `… relay` command bearing a known agent-island token, so uninstall removes
+    /// the strand left by EITHER install path. We require the relay suffix AND a known token so a
+    /// foreign hook that merely contains the word "relay" is never matched/removed.
     public static func isAgentIslandRelay(_ command: String) -> Bool {
         let c = command.replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
-        return c.contains("AgentIslandHookCLI") && c.hasSuffix(" relay")
+        guard c.hasSuffix(" relay") else { return false }
+        return c.contains("AgentIslandHookCLI") || c.contains("agentisland-hook")
     }
 }
