@@ -171,6 +171,20 @@ final class AppController: NSObject {
             }
         }
 
+        // Tooltip surfaces WHICH session needs you: the highest-priority waiting session's title +
+        // runtime (the glyph above stays a compact count). Quiet default when nothing's waiting.
+        if let top = sessions.filter({ isWaiting($0.status) })
+            .min(by: { DisplayPriority.rank($0.status) < DisplayPriority.rank($1.status) }) {
+            let name = TaskLineSanitizer.sanitize(top.title ?? top.label, maxLength: 28)
+            let elapsed = top.startedAt.map { TranscriptClock.elapsedLabel(from: $0, to: Date()) }
+            statusItem.button?.toolTip = elapsed.map { "\(name) · \($0)" } ?? name
+        } else if working {
+            let n = sessions.filter { $0.status == .working }.count
+            statusItem.button?.toolTip = (n == 1) ? "1 agent working" : "\(n) agents working"
+        } else {
+            statusItem.button?.toolTip = "agent-island"
+        }
+
         if islandEnabled {
             let rows: [IslandPanel.Row]
             if sessions.isEmpty {
