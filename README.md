@@ -2,7 +2,7 @@
 
 A quirky, quiet, always-on-top macOS status **island** that watches your Claude Code sessions — including their nested sub-agents — and shows, per session, whether each is **working**, **waiting for you**, or **done**, plus a one-line "what it's doing." Each session wears a randomized **persona** (Pirate, Astronaut, Herald, …); working sessions spin with a live step count; it's muted by default and stays out of your way.
 
-> **Status:** working v0 — menu-bar item + a collapsible, priority-ordered floating island (collapsed by default; expands to a scrollable list that animates only the running session), personas, live step + token counts, and an event-driven daemon (the default, via a reversible first-launch setup) are all in. Verified core logic with 98 self-test checks. A settings UI is still to come.
+> **Status:** working v0 — menu-bar item + a collapsible, priority-ordered floating island (collapsed by default; expands to a scrollable list that animates only the running session), personas, live step + token counts, and an event-driven daemon (the default, via a reversible first-launch setup) are all in. Verified core logic with 458 self-test checks. A settings UI is still to come.
 
 ## Requirements
 
@@ -57,6 +57,32 @@ agent-island
 - The **floating island** sits at the top-right, **collapsed by default** to a one-line summary (e.g. `agent-island · ❗1 waiting · ◐2 running ▸`). Click the header to expand a **scrollable, height-capped** list of active sessions (touched in the last 30 min), sorted by priority: **waiting for you → failed → running → finished**. Each row shows a persona glyph, project name, and state; **running** rows carry a live `N steps · T tok` line (steps = tool calls; tokens = peak request context + generated output) and are the **only** rows that animate (a rotating aurora ring) — waiting/failed/finished rows are dimmed and still, so only active work draws the eye. Motion respects macOS **Reduce Motion**. The collapsed/expanded choice is remembered; click a row's `▸` to expand its sub-agents.
 - **Quit** from the menu-bar item (or `⌘Q`).
 
+### Updating
+
+Re-run the one-line installer any time — it's **idempotent** and upgrades in place, keeping your settings, wired hooks, and installed themes:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mathur-prerit/agent-island/main/install.sh | sh
+```
+
+Or from the installed CLI:
+
+```sh
+agentisland update        # checks GitHub Releases; if newer, installs that release in place
+```
+
+Pin a specific version by prefixing the installer with `AGENT_ISLAND_RELEASE=v0.3.0` (or `=source` to force a from-source build).
+
+### Uninstalling
+
+```sh
+agentisland uninstall              # lists what it will do, asks to confirm, then reverses everything
+agentisland uninstall --dry-run    # print exactly what would be removed — changes nothing
+agentisland uninstall --yes        # skip the confirmation prompt
+```
+
+It reverses the Claude Code hooks (**preserving** any non-agent-island hooks and your other settings), unregisters the login item, and removes `~/.agent-island` and `/Applications/AgentIsland.app`. It **never** touches your `~/.claude` transcripts or other data. From a source checkout with no CLI on PATH, use `swift run agentisland uninstall`.
+
 ## Event-driven mode
 
 On first launch the app offers to **enable event-driven mode** — it installs the Claude Code hooks into `~/.claude/settings.json` (safe: backup + atomic write) and starts the `agentislandd` daemon for you. This gives instant updates plus the precise "needs your action" state and the done flourish. Decline and it polls every few seconds instead; toggle it anytime from the menu-bar item ▸ **Event-driven mode**. You can also set it up manually:
@@ -102,19 +128,98 @@ Notes that keep it honest:
 
 > Prebuilt binaries ship via GitHub Releases (built + attached by CI on each `v*` tag; ad-hoc-signed, de-quarantined on install). They are **not** Developer-ID signed or notarized yet — a notarized release and a real Homebrew tap are future work.
 
+## Creating a theme
+
+A **theme** decides what each session's status indicator looks (and sounds) like per state — idle / working / waiting / finished / failed — plus the row's background tint and any lifecycle sounds. There are two kinds; you author the **data** kind (no Swift, no compiling):
+
+- **Code themes** are compiled into the app (e.g. *Road Runner*'s scrolling token journey). Adding one means a Swift file — see the spec below.
+- **Data themes** are a declarative `theme.json` + asset files (images, sprite sheets, sounds). One generic interpreter renders any such folder, so they can be **bundled, installed locally, or downloaded**. This is what you make.
+
+### 1. Lay out the folder
+
+The folder name **must** equal the manifest `id` (the id is persisted forever — never rename it):
+
+```
+mytheme/
+  theme.json
+  images/      sprites/      sounds/
+```
+
+### 2. Write `theme.json` (schema v1)
+
+A minimal example (see `Sources/AgentIslandApp/Themes/critter/theme.json` for the full worked example):
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "id": "mytheme",                    // MUST equal the folder name
+  "displayName": "My Theme",
+  "minAppVersion": "0.3.0",           // optional: refuse to load on an older app
+  "showsPersonaGlyph": false,
+  "palette": { "accent": "#5AC8FA" },
+  "tint": { "working": "accent", "waitingPermission": "system:orange" },
+  "states": {                          // the six canonical state ids — you can't invent new ones
+    "working":           { "visual": { "kind": "sprite", "sheet": "sprites/run.png",
+                                        "frameWidth": 24, "frameHeight": 24, "frameCount": 4, "fps": 8 },
+                           "sound":  { "file": "sounds/blip.wav", "trigger": "onEnter", "volume": 0.5 } },
+    "waitingPermission": { "visual": { "kind": "image",  "file": "images/alert.png" } },
+    "waitingTurnEnd":    { "visual": { "kind": "text",   "string": "zZ", "color": "system:secondaryLabel" } },
+    "finished":          { "visual": { "kind": "symbol", "name": "checkmark.circle.fill", "tint": "system:green" } },
+    "failed":            { "visual": { "kind": "symbol", "name": "xmark.octagon.fill", "tint": "system:red" } },
+    "idle":              { "visual": { "kind": "text",   "string": "·", "color": "system:tertiaryLabel" } }
+  }
+}
+```
+
+- **`visual.kind`**: `image` (static) · `sprite` (a 1× horizontal strip sliced `frameWidth × frameHeight`, animated at `fps`) · `text` (monospace string + colour) · `symbol` (SF Symbol + tint).
+- **Colours**: `#RRGGBB[AA]` · a `palette` name · `system:<name>` (e.g. `system:teal`, `system:secondaryLabel`) · `clear`.
+- **Assets** are images (`png jpg jpeg gif heic pdf`) and audio (prefer short **WAV PCM**); paths are relative and inside the folder — `..`/absolute paths are rejected (Zip-Slip-safe).
+
+### 3. Preview + install
+
+```sh
+# Render all six states of any theme to a labelled PNG strip (headless eyeball):
+swift run AgentIslandApp -renderTheme mytheme /tmp/mytheme.png
+
+# Install locally: drop the folder in, then pick it from the menu-bar ▸ Animation theme submenu:
+cp -R mytheme ~/.agent-island/themes/mytheme
+```
+
+Or install a packaged theme without copying by hand — zip the folder and use the CLI (same validated, sandboxed install the app's menu uses):
+
+```sh
+agentisland theme add https://example.com/mytheme.zip   # https only; integrity + zip-slip checked
+agentisland theme set mytheme
+```
+
+### 4. Share it
+
+To publish for others, host the zip over https and (optionally) add an entry to the themes catalog so it appears in everyone's **Download more** submenu. The **full, authoritative spec** — every field, the sprite/colour rules, sound triggers, and the code-theme contract — lives in [`Sources/AgentIslandApp/Themes/README.md`](Sources/AgentIslandApp/Themes/README.md).
+
 ## How it works
 
 No Claude Code hook cleanly separates "waiting for input" from "finished" (`Stop` fires for both). agent-island derives state from the session transcript: it reads the **last conversational record** (skipping metadata records like `ai-title` / `permission-mode`), where a trailing assistant `tool_use` block means *working* and a stopped turn means *waiting for you*; an open permission prompt is an explicit block; `SessionEnd` / quit / staleness means *finished*. Sub-agents are read from `<session-uuid>/subagents/**/agent-*.jsonl`. All of this was verified against real `~/.claude` transcripts — see [`spike/FINDINGS.md`](spike/FINDINGS.md).
 
-## Build & test
+## Development
+
+Plain SwiftPM — no Xcode project, no XCTest. Everything runs under the Command Line Tools (`xcode-select --install`).
 
 ```sh
-swift build
-swift run AgentIslandSelfTest   # framework-free self-test runner (82 checks)
-swift run AgentIslandDemo       # the engine on your real ~/.claude transcripts
+swift build                       # debug build of every product
+swift run AgentIslandApp          # the menu-bar app (dev)
+swift run AgentIslandSelfTest     # framework-free test runner (458 checks)
+swift run AgentIslandDemo         # the state engine on your real ~/.claude transcripts
+./Scripts/build-app.sh            # package build/AgentIsland.app (icon + version-stamped plist)
 ```
 
-## Project layout
+Handy while developing:
+
+- **Render canaries** (headless, no GUI needed): `swift run AgentIslandApp -renderTheme <id> /tmp/out.png` renders all six states of any theme to a labelled PNG; `-renderRoadSample /tmp/road.png` renders the Road Runner banner grid.
+- **Self-test discipline**: the runner is framework-free so it works without full Xcode. When you change behavior, add checks in `Sources/AgentIslandSelfTest/main.swift` and keep it green; NSView rendering is verified by eye.
+- **Sandboxed effects**: the destructive paths (`uninstall`, hook install) honor `$HOME`, so exercise them with `HOME=$(mktemp -d) swift run agentisland uninstall --yes` to keep your real `~/.claude` / `~/.agent-island` untouched.
+- **Releases**: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds + attaches the per-arch prebuilt `.app` and CLI zips that `install.sh` downloads. Keep `CLIConstants.version`, `Scripts/build-app.sh`'s `VERSION`, and the tag in lockstep.
+
+### Project layout
 
 - `Sources/AgentIslandCore` — transcript adapter, state engine, sub-agent rollup, task-line sanitizer
 - `Sources/PersonaKit` — persona model + runtime + built-in personas + the hardened pack-loader validation
@@ -128,6 +233,13 @@ swift run AgentIslandDemo       # the engine on your real ~/.claude transcripts
 - `Sources/AgentIslandDemo`, `Sources/AgentIslandSelfTest` — console demo + framework-free tests
 - `install.sh`, `Scripts/build-app.sh`, `Formula/agent-island.rb`, `launchd/` — distribution
 - `spike/FINDINGS.md` — seam-verification findings (the integration-risk gate)
+
+## Contributing & feature requests
+
+- **Feature requests & ideas** — open a [GitHub issue](https://github.com/mathur-prerit/agent-island/issues/new). Describe the outcome you want and the use case (that helps more than a proposed implementation); tag it a feature request. 👍 existing issues you care about so priorities are visible.
+- **Bug reports** — open an issue with: what you did, what you expected, what happened, your macOS + Swift version (`swift --version`), and any relevant output from Console.app or a crash report (`~/Library/Logs/DiagnosticReports/AgentIslandApp-*.ips`).
+- **Themes** — community data themes are welcome; see [Creating a theme](#creating-a-theme).
+- **Pull requests** — keep changes focused and follow the existing patterns; make sure `swift run AgentIslandSelfTest` stays green and add checks for new behavior. More in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
