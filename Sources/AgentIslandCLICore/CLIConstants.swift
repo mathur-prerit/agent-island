@@ -11,7 +11,7 @@ public enum CLIConstants {
     /// released `agentisland` reports the released version (otherwise `update` would loop offering an
     /// "update" to the version already installed). The literal here is the DEV fallback; keep it in
     /// lockstep with `Scripts/build-app.sh`'s `VERSION` and the `AppInfo.version` fallback.
-    public static let version = "0.3.4"
+    public static let version = "0.3.5"
 
     /// The app's preferences domain — the bundle id stamped into `Info.plist` by `build-app.sh`. The
     /// `config` subcommand reads/writes the APP's defaults (via this suite), NOT the CLI's own domain,
