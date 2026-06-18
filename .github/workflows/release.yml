@@ -51,14 +51,15 @@ jobs:
           swift build -c release --product agentisland
 
       - name: Smoke-test the packaged app (must not crash on the bundled-themes path)
-        # Two guards against the Bundle.module launch crash:
-        #  (1) the SwiftPM resource bundle MUST sit at the .app ROOT (where Bundle.module resolves it).
-        #  (2) run the PACKAGED exec through the themes path (Bundle.module → Themes.all) with `.build`
-        #      HIDDEN — otherwise Bundle.module's baked-in `.build/` fallback resolves on the CI runner
-        #      and a MISPLACED bundle false-passes here while crashing OFF the build machine (the v0.3.3
-        #      bug). Hiding .build makes this match a real user's machine.
+        # Two guards against the resource-bundle launch crash:
+        #  (1) the SwiftPM resource bundle MUST sit in Contents/Resources — the codesign-clean location
+        #      AppResources.bundle resolves first (NOT the .app root: codesign rejects root content).
+        #  (2) run the PACKAGED exec through the themes path (AppResources.bundle → Themes.all) with
+        #      `.build` HIDDEN — otherwise Bundle.module's baked-in `.build/` fallback resolves on the CI
+        #      runner and a MISPLACED bundle false-passes here while crashing OFF the build machine (the
+        #      v0.3.3 bug). Hiding .build makes this match a real user's machine.
         run: |
-          test -d "build/AgentIsland.app/AgentIsland_AgentIslandApp.bundle"
+          test -d "build/AgentIsland.app/Contents/Resources/AgentIsland_AgentIslandApp.bundle"
           mv .build .build.hidden
           if build/AgentIsland.app/Contents/MacOS/AgentIslandApp -renderTheme journey "$RUNNER_TEMP/smoke.png"; then rc=0; else rc=$?; fi
           mv .build.hidden .build
