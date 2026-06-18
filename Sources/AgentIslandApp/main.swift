@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import QuartzCore
+import ServiceManagement
 import AgentIslandCore
 import PersonaKit
 import AgentIslandDaemon
@@ -135,7 +136,20 @@ final class AppController: NSObject {
             menu.addItem(infoItem("No active sessions (last 30 min)"))
         } else {
             menu.addItem(infoItem("Active sessions"))
-            for s in sessions { menu.addItem(infoItem(rowText(for: s))) }
+            for s in sessions {
+                // Clickable when we know the owning terminal (daemon mode / state.json captures the window
+                // identity) — clicking focuses its tab/window, the same as clicking the island row. In
+                // polling-only mode there's no identity to focus, so the row stays plain info text.
+                if windowIdentities[s.fullID] != nil {
+                    let row = NSMenuItem(title: rowText(for: s),
+                                         action: #selector(focusSessionFromMenu(_:)), keyEquivalent: "")
+                    row.target = self; row.isEnabled = true; row.representedObject = s.fullID
+                    row.toolTip = "Click to focus this session's terminal"
+                    menu.addItem(row)
+                } else {
+                    menu.addItem(infoItem(rowText(for: s)))
+                }
+            }
         }
         menu.addItem(.separator())
         // "Update available" indicator: only present when the daily check found a strictly-newer,
@@ -223,6 +237,13 @@ final class AppController: NSObject {
         keepAwakeToggle.target = self; keepAwakeToggle.isEnabled = true
         keepAwakeToggle.state = UserDefaults.standard.bool(forKey: keepAwakeKey) ? .on : .off
         menu.addItem(keepAwakeToggle)
+
+        // Start-on-boot, controllable right here in the menu (no need for the CLI). Registering the main
+        // app as a login item from INSIDE the running .app is the reliable SMAppService path.
+        let loginToggle = NSMenuItem(title: "Launch at login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        loginToggle.target = self; loginToggle.isEnabled = true
+        loginToggle.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        menu.addItem(loginToggle)
 
         menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
@@ -474,6 +495,34 @@ final class AppController: NSObject {
     @objc private func toggleKeepAwake() {
         UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: keepAwakeKey), forKey: keepAwakeKey)
         refresh()
+    }
+
+    /// Toggle the app as a login item (start on boot) via SMAppService. Registering the MAIN APP from
+    /// inside the running .app is the reliable path (unlike the bundle-less CLI). If macOS reports the
+    /// item requires approval (or register/unregister throws), open the Login Items settings pane so the
+    /// user can flip it manually rather than being left wondering whether it took.
+    @objc private func toggleLoginItem() {
+        let svc = SMAppService.mainApp
+        do {
+            if svc.status == .enabled { try svc.unregister() } else { try svc.register() }
+            if svc.status == .requiresApproval { openLoginItemsSettings() }
+        } catch {
+            openLoginItemsSettings()
+        }
+        refresh()
+    }
+
+    private func openLoginItemsSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Focus the terminal owning the session clicked in the menu (reuses the island's click-to-focus:
+    /// iTerm selects the exact tab/session by GUID; other terminals are raised by bundle id).
+    @objc private func focusSessionFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        focusWindow(id)
     }
 
     /// Hold an idle-system-sleep assertion only while the toggle is ON and a session is working;
