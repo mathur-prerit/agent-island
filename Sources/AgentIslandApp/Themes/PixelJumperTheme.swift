@@ -19,16 +19,21 @@ struct PixelJumperTheme: IslandTheme {
     func icon() -> NSImage { IslandIcons.symbol("figure.run", pointSize: 12) }
     func tint(for row: IslandPanel.Row) -> NSColor { stateTint(row) }
 
-    /// Original synthesized cues, bundled under `Themes/PixelJumper/`.
+    /// A user-supplied local override clip (if present), else the bundled original synthesized cue.
     func sound(for transition: SoundTransition) -> URL? {
         switch transition {
-        case .startedWorking:            return Self.clip("started")
-        case .enteredWaiting:            return Self.clip("waiting")
-        case .enteredFinished(.success): return Self.clip("complete")
-        case .enteredFinished(.failed):  return Self.clip("gameover")
+        case .startedWorking:            return Self.cue("started")
+        case .enteredWaiting:            return Self.cue("waiting")
+        case .enteredFinished(.success): return Self.cue("complete")
+        case .enteredFinished(.failed):  return Self.cue("gameover")
         case .enteredFinished(.unknown): return nil
         }
     }
+
+    /// Prefer a clip the user dropped in their LOCAL override folder
+    /// (`~/.agent-island/themes/jumper/<name>.wav`), else the bundled original. This lets you point the
+    /// theme at your own audio on your machine without that audio ever being committed to the repo.
+    private static func cue(_ name: String) -> URL? { PixelJumperOverride.wav(name) ?? clip(name) }
 
     private static func clip(_ name: String) -> URL? {
         Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "PixelJumper")
@@ -90,6 +95,28 @@ final class PixelJumperScene: ThemeScene {
     private func setIcon(_ image: NSImage, tint: NSColor?) {
         icon.image = image; icon.contentTintColor = tint; stageActive = false
     }
+}
+
+// MARK: - Local asset override (bring-your-own-assets)
+
+/// Optional user-supplied overrides loaded at runtime from `~/.agent-island/themes/jumper/` — NEVER
+/// from the repo. Drop in your own `runner.png` (a single sprite or a horizontal run/jump sheet) and/or
+/// `started.wav` / `waiting.wav` / `complete.wav` / `gameover.wav`, and this theme uses them instead of
+/// the bundled originals. The mechanism ships; your personal assets stay local and uncommitted.
+enum PixelJumperOverride {
+    static let dir = ("~/.agent-island/themes/jumper" as NSString).expandingTildeInPath
+
+    /// A local override clip URL, or nil to fall back to the bundled cue.
+    static func wav(_ name: String) -> URL? {
+        let p = "\(dir)/\(name).wav"
+        return FileManager.default.fileExists(atPath: p) ? URL(fileURLWithPath: p) : nil
+    }
+
+    /// The user's runner sprite, loaded once (nil if absent/unreadable → procedural runner is used).
+    static let runner: NSImage? = {
+        let p = "\(dir)/runner.png"
+        return FileManager.default.fileExists(atPath: p) ? NSImage(contentsOfFile: p) : nil
+    }()
 }
 
 // MARK: - Platformer scene view (original procedural art)
@@ -191,6 +218,13 @@ final class PlatformerSceneView: NSView {
         let jump = (moving && phase < 12) ? sin(Double(phase) / 12.0 * .pi) * 9.0 : 0
         let x = runnerX, y = groundY + CGFloat(jump)
 
+        // Local override: draw the user's own runner sprite (if they dropped one in) instead of the
+        // procedural runner — this is how a personal install gets a custom look, no committed assets.
+        if let sprite = PixelJumperOverride.runner {
+            drawSprite(sprite, x: x, baseY: y, tier: tier, moving: moving, jumping: jump > 0.5)
+            return
+        }
+
         accent.setFill()
         // Body.
         NSBezierPath(roundedRect: NSRect(x: x - bw/2, y: y, width: bw, height: bh), xRadius: 2, yRadius: 2).fill()
@@ -214,6 +248,23 @@ final class PlatformerSceneView: NSView {
             NSColor.systemYellow.setFill()
             drawStar(center: NSPoint(x: x + hw*0.5 + 3, y: hy + hh + 2), r: 3)
         }
+    }
+
+    /// Draw a user-supplied runner sprite at the runner slot. A wide image is treated as a horizontal
+    /// run/jump sheet (square frames sliced by height: cycle while running, last frame while jumping);
+    /// a square-ish image is drawn as a single frame. Aspect ratio is preserved; height scales a touch
+    /// with the power tier.
+    private func drawSprite(_ img: NSImage, x: CGFloat, baseY: CGFloat, tier: Int, moving: Bool, jumping: Bool) {
+        let s = img.size
+        guard s.width > 0, s.height > 0 else { return }
+        let nFrames = (s.width > s.height * 1.4) ? max(1, Int((s.width / s.height).rounded())) : 1
+        let frameW = s.width / CGFloat(nFrames)
+        let fi = jumping ? (nFrames - 1) : ((moving && nFrames > 1) ? (frame_ / 4) % nFrames : 0)
+        let src = NSRect(x: CGFloat(fi) * frameW, y: 0, width: frameW, height: s.height)
+        let destH = 14.0 + CGFloat(tier) * 2.0
+        let destW = destH * (frameW / s.height)
+        img.draw(in: NSRect(x: x - destW/2, y: baseY, width: destW, height: destH),
+                 from: src, operation: .sourceOver, fraction: 1.0)
     }
 
     private func drawStar(center: NSPoint, r: CGFloat) {
