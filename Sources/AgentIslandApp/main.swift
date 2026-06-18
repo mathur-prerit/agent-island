@@ -71,7 +71,9 @@ final class AppController: NSObject {
     private let openCodeProvider = OpenCodeProvider()
 
     func start() {
-        statusItem.button?.title = "○"
+        // Seed the robot-head "agent" glyph before the first refresh() (overwritten per-state below).
+        statusItem.button?.image = IslandIcons.robotHead(color: .secondaryLabelColor)
+        statusItem.button?.imagePosition = .imageLeading
         menu.autoenablesItems = false
         statusItem.menu = menu
         dismissedFinished = Set(UserDefaults.standard.stringArray(forKey: dismissedKey) ?? [])
@@ -239,19 +241,29 @@ final class AppController: NSObject {
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
         updateSleepAssertion(on: UserDefaults.standard.bool(forKey: keepAwakeKey), working: working)
-        let glyph: String
-        let glyphColor: NSColor
-        // A subtle update cue rides only on the idle glyph (○⋯) — the urgent waiting/working states keep
-        // their uncluttered count, so the update hint never competes with "an agent needs you". The menu
-        // item is the real affordance; this is just a quiet "there's something in the menu".
+        // The menu-bar "agent" (robot head) is tinted by the most urgent state, mirroring the island's
+        // palette: red waiting · teal working · green finished · gray idle. Only the waiting state carries
+        // a trailing COUNT (text beside the icon); a quiet corner dot rides the IDLE icon as the
+        // "update available" cue so it never competes with "an agent needs you". The menu item is the
+        // real update affordance; the dot is just "there's something in the menu".
         let updateCue = updateAvailable.offeredVersion != nil
-        if waiting > 0 { glyph = "● \(waiting)"; glyphColor = .systemRed }
-        else if working { glyph = "◐"; glyphColor = .systemTeal }
-        else { glyph = updateCue ? "○⋯" : "○"; glyphColor = .secondaryLabelColor }
+        let finishedPresent = sessions.contains { isFinished($0.status) }
+        let tintColor: NSColor
+        let countText: String
+        if waiting > 0 { tintColor = .systemRed; countText = "\(waiting)" }
+        else if working { tintColor = .systemTeal; countText = "" }
+        else if finishedPresent { tintColor = .systemGreen; countText = "" }
+        else { tintColor = .secondaryLabelColor; countText = "" }
         if let button = statusItem.button {
+            button.image = IslandIcons.robotHead(
+                color: tintColor,
+                showUpdateDot: updateCue && waiting == 0 && !working && !finishedPresent)
+            button.imagePosition = .imageLeading
+            // The waiting count rides as text beside the icon (variableLength sizes the item to fit);
+            // a leading space gives a small gap. Empty otherwise so the item stays icon-only.
             button.attributedTitle = NSAttributedString(
-                string: glyph,
-                attributes: [.foregroundColor: glyphColor, .font: NSFont.systemFont(ofSize: 13)])
+                string: countText.isEmpty ? "" : " \(countText)",
+                attributes: [.foregroundColor: tintColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
             button.wantsLayer = true
             if waiting > 0 && !IslandAnimations.reduceMotion {
                 if button.layer?.animation(forKey: "menu-pulse") == nil {
