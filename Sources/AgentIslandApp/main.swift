@@ -276,19 +276,20 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(quit)
 
         let waiting = sessions.filter { isWaiting($0.status) }.count
-        let working = sessions.contains { $0.status == .working }
+        let workingCount = sessions.filter { $0.status == .working }.count
+        let working = workingCount > 0
         updateSleepAssertion(on: UserDefaults.standard.bool(forKey: keepAwakeKey), working: working)
-        // The menu-bar "agent" (robot head) is tinted by the most urgent state, mirroring the island's
-        // palette: red waiting · teal working · green finished · gray idle. Only the waiting state carries
-        // a trailing COUNT (text beside the icon); a quiet corner dot rides the IDLE icon as the
-        // "update available" cue so it never competes with "an agent needs you". The menu item is the
-        // real update affordance; the dot is just "there's something in the menu".
+        // The menu-bar lighthouse's lamp is tinted by the most urgent state, mirroring the island's
+        // palette: red waiting · teal working · green finished · gray idle. The dominant state's COUNT
+        // rides as trailing text — how many agents are WAITING on you, else how many are RUNNING. A quiet
+        // corner dot rides the IDLE icon as the "update available" cue so it never competes with "an agent
+        // needs you". The menu item is the real update affordance; the dot is just "there's something".
         let updateCue = updateAvailable.offeredVersion != nil
         let finishedPresent = sessions.contains { isFinished($0.status) }
         let tintColor: NSColor
         let countText: String
         if waiting > 0 { tintColor = .systemRed; countText = "\(waiting)" }
-        else if working { tintColor = .systemTeal; countText = "" }
+        else if working { tintColor = .systemTeal; countText = "\(workingCount)" }
         else if finishedPresent { tintColor = .systemGreen; countText = "" }
         else { tintColor = .secondaryLabelColor; countText = "" }
         // The lamp/beam carry the state colour on a neutral (labelColor) lighthouse; the beam lights and
