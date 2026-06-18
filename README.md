@@ -2,7 +2,7 @@
 
 A quirky, quiet, always-on-top macOS status **island** that watches your Claude Code sessions — including their nested sub-agents — and shows, per session, whether each is **working**, **waiting for you**, or **done**, plus a one-line "what it's doing." Each session wears a randomized **persona** (Pirate, Astronaut, Herald, …); working sessions spin with a live step count; it's muted by default and stays out of your way.
 
-> **Status:** working v0 — menu-bar item + a collapsible, priority-ordered floating island (collapsed by default; expands to a scrollable list that animates only the running session), personas, live step + token counts, and an event-driven daemon (the default, via a reversible first-launch setup) are all in. Verified core logic with 458 self-test checks. A settings UI is still to come.
+> **Status:** working v0 — menu-bar item + a collapsible, priority-ordered floating island (collapsed by default; expands to a scrollable list that animates only the running session), personas, live step + token counts, and an event-driven daemon (the default, via a reversible first-launch setup) are all in. Verified core logic with 461 self-test checks. A settings UI is still to come.
 
 ## Demo
 
@@ -37,7 +37,7 @@ Gatekeeper's "unidentified developer" warning affects *downloaded, unsigned* app
 curl -fsSL https://raw.githubusercontent.com/mathur-prerit/agent-island/main/install.sh | sh
 ```
 
-By default this **downloads the latest published release's prebuilt artifacts** — no Xcode or Swift toolchain needed: it fetches the `AgentIsland.app` + CLI zips for your CPU arch, verifies their checksums, de-quarantines + ad-hoc-signs the app, copies it to `/Applications`, installs the `agentisland` and `agentisland-hook` binaries to **`/opt/homebrew/bin`** on Apple Silicon (or `/usr/local/bin` on Intel; set `AGENT_ISLAND_BIN_DIR` to override), and wires the Claude Code lifecycle hooks (backup + atomic write). If there's no release asset for your arch (or you're offline), it **automatically falls back to building from source** (`git` + `swift` required only on that path). Run interactively, it also lets you **pick a look (theme)** and offers to enable start-on-boot. It's **idempotent** — re-run it to upgrade. Pin a specific release with `AGENT_ISLAND_RELEASE=v0.3.0`, or force a source build with `AGENT_ISLAND_RELEASE=source`. Reverse everything with `agentisland uninstall`.
+By default this **downloads the latest published release's prebuilt artifacts** — no Xcode or Swift toolchain needed: it fetches the `AgentIsland.app` + CLI zips for your CPU arch, verifies their checksums, de-quarantines + ad-hoc-signs the app, copies it to `/Applications`, installs the `agentisland` and `agentisland-hook` binaries to **`/opt/homebrew/bin`** on Apple Silicon (or `/usr/local/bin` on Intel; set `AGENT_ISLAND_BIN_DIR` to override), and wires the Claude Code lifecycle hooks (backup + atomic write). If there's no release asset for your arch (or you're offline), it **automatically falls back to building from source** (`git` + `swift` required only on that path). Run interactively, it also lets you **pick a look (theme)** and offers to enable start-on-boot. It's **idempotent** — re-run it to upgrade. Pin a specific release with `AGENT_ISLAND_RELEASE=v0.3.3`, or force a source build with `AGENT_ISLAND_RELEASE=source`. Reverse everything with `agentisland uninstall`.
 
 ### Option A — Run from source (quickest)
 
@@ -70,9 +70,10 @@ agent-island
 
 ### After launching
 
-- A small glyph appears in your **menu bar** (top-right), colored by aggregate state: gray `○` idle · teal `◐` working · red, gently pulsing `● N` when N sessions wait on you. Click it for the session list, a **Show floating island** toggle, an **Event-driven mode** toggle, and **Quit**.
+- A small **lighthouse** appears in your **menu bar** (top-right) — its lamp + a sweeping beam signal the aggregate state: dim when idle, a **teal** beam sweeping while agents work (with the running count beside it), **red** and gently pulsing when **N** sessions wait on you, **green** when done. Click it for the session list, **Show floating island**, **Event-driven mode**, **Launch at login**, the **Animation theme** picker, and **Quit**.
 - The **floating island** sits at the top-right, **collapsed by default** to a one-line summary (e.g. `agent-island · ❗1 waiting · ◐2 running ▸`). Click the header to expand a **scrollable, height-capped** list of active sessions (touched in the last 30 min), sorted by priority: **waiting for you → failed → running → finished**. Each row shows a persona glyph, project name, and state; **running** rows carry a live `N steps · T tok` line (steps = tool calls; tokens = peak request context + generated output) and are the **only** rows that animate (a rotating aurora ring) — waiting/failed/finished rows are dimmed and still, so only active work draws the eye. Motion respects macOS **Reduce Motion**. The collapsed/expanded choice is remembered; click a row's `▸` to expand its sub-agents.
 - **Quit** from the menu-bar item (or `⌘Q`).
+- **Don't see anything after launching?** It's a **menu-bar-only** app — no Dock icon and no window, so look at the **top-right of the menu bar** for the lighthouse. If nothing appears at all, you're likely on an old build: update with `agentisland update` (or re-run the installer) to get the latest release.
 
 ### Updating
 
@@ -88,7 +89,7 @@ Or from the installed CLI:
 agentisland update        # checks GitHub Releases; if newer, installs that release in place
 ```
 
-Pin a specific version by prefixing the installer with `AGENT_ISLAND_RELEASE=v0.3.0` (or `=source` to force a from-source build).
+Pin a specific version by prefixing the installer with `AGENT_ISLAND_RELEASE=v0.3.3` (or `=source` to force a from-source build).
 
 ### Uninstalling
 
@@ -229,7 +230,7 @@ Plain SwiftPM — no Xcode project, no XCTest. Everything runs under the Command
 ```sh
 swift build                       # debug build of every product
 swift run AgentIslandApp          # the menu-bar app (dev)
-swift run AgentIslandSelfTest     # framework-free test runner (458 checks)
+swift run AgentIslandSelfTest     # framework-free test runner (461 checks)
 swift run AgentIslandDemo         # the state engine on your real ~/.claude transcripts
 ./Scripts/build-app.sh            # package build/AgentIsland.app (icon + version-stamped plist)
 ```
