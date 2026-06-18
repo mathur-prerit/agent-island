@@ -46,9 +46,21 @@ public struct InstallPaths: Equatable {
     /// The directory the `agentisland` + `agentisland-hook` binaries are copied to (on PATH).
     public var binDir: String
 
+    /// The default PATH dir the installer uses, by CPU arch — matches `install.sh`'s `BIN_DIR` default
+    /// so `uninstall` removes the binaries from the SAME place they were installed. On Apple Silicon
+    /// /usr/local/bin isn't on PATH (nor writable without sudo); Homebrew's /opt/homebrew/bin is. Compiled
+    /// per-arch, so `#if arch` reflects the running CPU. (The app's `locateManagementCLI` searches both.)
+    public static var defaultBinDir: String {
+        #if arch(arm64)
+        return "/opt/homebrew/bin"
+        #else
+        return "/usr/local/bin"
+        #endif
+    }
+
     public init(home: String,
                 appPath: String = "/Applications/AgentIsland.app",
-                binDir: String = "/usr/local/bin") {
+                binDir: String = InstallPaths.defaultBinDir) {
         self.home = home
         self.appPath = appPath
         self.binDir = binDir

@@ -13,7 +13,9 @@ cd "$ROOT"
 # (the "update available" indicator compares this against the latest GitHub release). Keep this in
 # lockstep with the `AppInfo.version` fallback in ManifestThemeDiscovery.swift — that fallback is the
 # version a bare `swift run AgentIslandApp` reports (no bundle plist), so they must agree.
-VERSION="0.3.0"
+# Overridable so the release CI can stamp the git tag into the plist (VERSION=${TAG#v} bash build-app.sh).
+# Keep the 0.3.0 fallback in lockstep with CLIConstants.version + the AppInfo.version fallback.
+VERSION="${VERSION:-0.3.0}"
 
 echo "Building AgentIslandApp + daemon + hook bridge + management CLI (release)…"
 swift build -c release --product AgentIslandApp

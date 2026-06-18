@@ -38,24 +38,29 @@ enum UpdateCommand {
                 out("To update, run:\n  \(CLIConstants.installOneLiner)")
                 return true
             }
-            out("Update now by re-running the installer? This rebuilds from source. [y/N] ", terminator: "")
+            out("Update now? Downloads the \(newVersion) release (or builds from source if no prebuilt asset). [y/N] ", terminator: "")
             let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
             guard answer == "y" || answer == "yes" else {
                 out("Skipped. To update later:\n  \(CLIConstants.installOneLiner)")
                 return true
             }
-            return applyUpdate()
+            return applyUpdate(release: "v\(newVersion)")
         }
     }
 
     /// Apply the update by piping the installer through `sh` (the same one-liner). We shell out to
-    /// `curl … | sh` rather than re-implementing the install steps — one source of truth. Returns the
+    /// `curl … | sh` rather than re-implementing the install steps — one source of truth. `release` pins
+    /// the installer to the offered tag (AGENT_ISLAND_RELEASE), so `update` pulls exactly that release's
+    /// prebuilt artifact (the inner `sh` after the pipe inherits this environment). Returns the
     /// installer's success.
-    private static func applyUpdate() -> Bool {
+    private static func applyUpdate(release: String) -> Bool {
         out("Running the installer…")
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments = ["-c", CLIConstants.installOneLiner]
+        var env = ProcessInfo.processInfo.environment
+        env["AGENT_ISLAND_RELEASE"] = release
+        proc.environment = env
         do { try proc.run() } catch {
             errOut("agentisland: couldn't launch the installer — run it manually:\n  \(CLIConstants.installOneLiner)")
             return false

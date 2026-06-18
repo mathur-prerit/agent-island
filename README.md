@@ -12,15 +12,15 @@ A quirky, quiet, always-on-top macOS status **island** that watches your Claude 
 
 ## Installation
 
-Gatekeeper's "unidentified developer" warning only affects *downloaded, unsigned* apps — building locally avoids it entirely, so **no Apple ID, code-signing, or notarization is involved**. Pick whichever fits you:
+Gatekeeper's "unidentified developer" warning affects *downloaded, unsigned* apps. The installer handles it for you — it strips the quarantine flag and ad-hoc-signs the downloaded app so it opens normally — and the from-source fallback avoids it entirely (a locally built app is never quarantined). **No Apple ID, code-signing, or notarization is involved.** Pick whichever fits you:
 
-### Option 0 — One-line installer (builds from source)
+### Option 0 — One-line installer (prebuilt release, falls back to source)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mathur-prerit/agent-island/main/install.sh | sh
 ```
 
-This **builds from source** (there are no pre-built binary releases yet — it's honest about that): it clones the repo to a temp dir, builds the `.app` + daemon + both CLIs via `Scripts/build-app.sh`, copies `AgentIsland.app` to `/Applications`, installs the `agentisland` and `agentisland-hook` binaries to `/usr/local/bin` (set `AGENT_ISLAND_BIN_DIR` to override), and wires the Claude Code lifecycle hooks (backup + atomic write). Run interactively, it also offers to enable start-on-boot. It's **idempotent** — re-run it to upgrade. Requires `git` and `swift` (Xcode or the Command Line Tools). Reverse everything with `agentisland uninstall`.
+By default this **downloads the latest published release's prebuilt artifacts** — no Xcode or Swift toolchain needed: it fetches the `AgentIsland.app` + CLI zips for your CPU arch, verifies their checksums, de-quarantines + ad-hoc-signs the app, copies it to `/Applications`, installs the `agentisland` and `agentisland-hook` binaries to **`/opt/homebrew/bin`** on Apple Silicon (or `/usr/local/bin` on Intel; set `AGENT_ISLAND_BIN_DIR` to override), and wires the Claude Code lifecycle hooks (backup + atomic write). If there's no release asset for your arch (or you're offline), it **automatically falls back to building from source** (`git` + `swift` required only on that path). Run interactively, it also offers to enable start-on-boot. It's **idempotent** — re-run it to upgrade. Pin a specific release with `AGENT_ISLAND_RELEASE=v0.3.0`, or force a source build with `AGENT_ISLAND_RELEASE=source`. Reverse everything with `agentisland uninstall`.
 
 ### Option A — Run from source (quickest)
 
@@ -96,11 +96,11 @@ Notes that keep it honest:
 
 - **`config`** reads and writes the **app's own preferences domain** (`com.mathur-prerit.agentisland`), so a `config set` is exactly what the running app reads — restart agent-island to pick up a change. Settable keys: `islandTheme`, `soundEnabled`, `soundCueSet` (`theme`|`default`), `islandKeepAwake`, and `eventDrivenSetupDecision` (`enabled`|`declined`|`error`). Unknown keys and off-allowlist values are refused.
 - **`theme add`** downloads over **https only** and runs the *same* validate-then-install pipeline the app's menu uses — integrity check → zip-bomb / zip-slip / symlink inspection → sandboxed extraction → strict manifest validation → atomic install. A bad archive is rejected with no partial install left behind. Catalog ids carry a published SHA-256/size; a raw `https` url is installed as-is (its bytes are its own integrity claim).
-- **`update`** compares your installed version against the latest GitHub release; if newer, it offers to re-run the from-source installer in place (or, non-interactively, prints the one-liner). No silent self-mutation.
-- **`start-on-boot`** uses macOS 13+ `SMAppService` to register the **app** as a login item (the daemon follows the app — there's no separate LaunchAgent). A bare `start-on-boot` just reports status. Because the CLI binary isn't itself the app bundle, on/off also print the manual fallback (System Settings ▸ General ▸ Login Items) in case the automatic toggle doesn't take.
+- **`update`** compares your installed version against the latest GitHub release; if newer, it offers to re-run the installer pinned to that release (downloading the prebuilt artifact, or building from source if none is available). No silent self-mutation.
+- **`start-on-boot`** uses macOS 13+ `SMAppService` to register the **app** as a login item (the daemon follows the app — there's no separate LaunchAgent). A bare `start-on-boot` just reports status. Because the CLI binary isn't itself the app bundle, on/off also print the manual fallback (System Settings ▸ General ▸ Login Items) in case the automatic toggle doesn't take. *(The app's menu-bar ▸ **Launch at login** toggle does this directly from inside the bundle — the most reliable path.)*
 - **`uninstall`** reverses the hooks (preserving any non-agent-island hooks and your other settings), unregisters the login item, and removes `~/.agent-island` and the `.app`. It **confirms first** (skip with `--yes`); `--dry-run` prints exactly what it would do and changes nothing.
 
-> No Homebrew tap or binary releases yet — everything above is build-from-source. A signed binary release + a real Homebrew tap are future work.
+> Prebuilt binaries ship via GitHub Releases (built + attached by CI on each `v*` tag; ad-hoc-signed, de-quarantined on install). They are **not** Developer-ID signed or notarized yet — a notarized release and a real Homebrew tap are future work.
 
 ## How it works
 
