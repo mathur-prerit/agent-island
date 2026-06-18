@@ -50,6 +50,9 @@ case .uninstall(let yes, let dryRun, let purge):
 case .startOnBoot(let action):
     exit(StartOnBootCommand.run(action) ? 0 : 1)
 
+case .daemon(let action):
+    exit(DaemonCommand.run(action) ? 0 : 1)
+
 case .unknown(let token):
     errOut("agentisland: unknown command '\(token)'")
     errOut("")

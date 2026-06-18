@@ -1152,6 +1152,12 @@ check(CommandParser.parse(["start-on-boot", "on"]) == .startOnBoot(.on), "cli-pa
 check(CommandParser.parse(["start-on-boot", "off"]) == .startOnBoot(.off), "cli-parse: start-on-boot off")
 check({ if case .usageError = CommandParser.parse(["start-on-boot", "maybe"]) { return true }; return false }(),
       "cli-parse: start-on-boot bad verb -> usageError")
+check(CommandParser.parse(["daemon"]) == .daemon(.status), "cli-parse: bare daemon -> status")
+check(CommandParser.parse(["daemon", "stop"]) == .daemon(.stop), "cli-parse: daemon stop")
+check(CommandParser.parse(["daemon", "restart"]) == .daemon(.restart), "cli-parse: daemon restart")
+check(CommandParser.parse(["daemon", "--restart"]) == .daemon(.restart), "cli-parse: daemon --restart (flag alias)")
+check({ if case .usageError = CommandParser.parse(["daemon", "frob"]) { return true }; return false }(),
+      "cli-parse: daemon bad verb -> usageError")
 check({ if case .unknown(let t) = CommandParser.parse(["frobnicate"]) { return t == "frobnicate" }; return false }(),
       "cli-parse: unknown top-level command")
 
