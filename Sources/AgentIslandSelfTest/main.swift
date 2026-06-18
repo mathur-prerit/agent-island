@@ -274,6 +274,20 @@ check(TransitionDetector.transition(from: .working, to: .finished(.failed)) == .
       "transition: -> finished(failed) fires game over")
 check(TransitionDetector.transition(from: .finished(.success), to: .finished(.success)) == nil,
       "transition: already finished does not re-fire")
+// default (non-theme) cue set: pure transition -> clip-name mapping (App resolves names to WAVs)
+check(DefaultSoundSet.clipName(for: .startedWorking) == "started",
+      "default set: startedWorking -> started")
+check(DefaultSoundSet.clipName(for: .enteredWaiting(.stoppedTurn)) == "waiting",
+      "default set: enteredWaiting(stopped) -> waiting")
+check(DefaultSoundSet.clipName(for: .enteredWaiting(.permission)) == "waiting",
+      "default set: enteredWaiting(permission) -> waiting (same neutral cue)")
+check(DefaultSoundSet.clipName(for: .enteredFinished(.success)) == "finished_ok",
+      "default set: finished(success) -> finished_ok")
+check(DefaultSoundSet.clipName(for: .enteredFinished(.failed)) == "finished_fail",
+      "default set: finished(failed) -> finished_fail")
+check(DefaultSoundSet.clipName(for: .enteredFinished(.unknown)) == nil,
+      "default set: finished(unknown) -> nil (silent, matching the theme)")
+
 let throttleBase = Date(timeIntervalSince1970: 1_700_000_000)
 check(PlayThrottle.allows(now: throttleBase, last: .distantPast, cooldown: 1.0), "throttle: first play allowed")
 check(!PlayThrottle.allows(now: throttleBase.addingTimeInterval(0.5), last: throttleBase, cooldown: 1.0), "throttle: within cooldown blocked")

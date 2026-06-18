@@ -91,11 +91,24 @@ final class AppController: NSObject {
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
 
-        // Quiet by default: themes opt into lifecycle sound cues (today only Road Runner's arcade set).
+        // Quiet by default: themes opt into lifecycle sound cues (today only Road Runner's arcade set);
+        // the neutral default set fills in for silent themes (or replaces the theme set entirely).
         let soundToggle = NSMenuItem(title: "Sound cues", action: #selector(toggleSound), keyEquivalent: "")
         soundToggle.target = self; soundToggle.isEnabled = true
         soundToggle.state = SoundManager.shared.isEnabled ? .on : .off
         menu.addItem(soundToggle)
+
+        let soundSetItem = NSMenuItem(title: "Sound set", action: nil, keyEquivalent: "")
+        let soundSetMenu = NSMenu()
+        let activeSet = currentSoundSet
+        for (id, label) in [("theme", "Theme set"), ("default", "Default set")] {
+            let si = NSMenuItem(title: label, action: #selector(pickSoundSet(_:)), keyEquivalent: "")
+            si.target = self; si.representedObject = id; si.state = (id == activeSet) ? .on : .off
+            si.isEnabled = true   // always pickable; the choice just takes effect once cues are on
+            soundSetMenu.addItem(si)
+        }
+        soundSetItem.submenu = soundSetMenu
+        menu.addItem(soundSetItem)
 
         menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
@@ -219,10 +232,22 @@ final class AppController: NSObject {
         refresh()
     }
 
+    @objc private func pickSoundSet(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(id, forKey: AppController.soundSetKey)
+        refresh()
+    }
+
     // MARK: - Sound cues (theme-owned lifecycle jingles)
 
     /// The theme the user has selected — the source of any transition sounds.
     private var currentTheme: IslandTheme { Themes.named(UserDefaults.standard.string(forKey: "islandTheme")) }
+
+    static let soundSetKey = "soundCueSet"   // UserDefaults; "theme" (default) | "default"
+
+    /// Which cue set plays: the selected theme's jingles ("theme", filling silence with the neutral
+    /// set) or always the neutral default set ("default"). Absent → "theme".
+    private var currentSoundSet: String { UserDefaults.standard.string(forKey: AppController.soundSetKey) ?? "theme" }
 
     /// Diff each visible session's status+tokens against the previous refresh and play the current
     /// theme's clip for any sound-worthy transition. Prunes ids no longer present so a resumed
@@ -231,9 +256,15 @@ final class AppController: NSObject {
     private func detectTransitions(in sessions: [Session]) {
         let present = Set(sessions.map(\.fullID))
         let theme = currentTheme
+        let useDefaultSet = (currentSoundSet == "default")
         for s in sessions {
             if let transition = TransitionDetector.transition(from: lastStatus[s.fullID], to: s.status) {
-                SoundManager.shared.play(theme.sound(for: transition))
+                // "default" set always plays the neutral cues; "theme" set prefers the theme's own
+                // jingle and falls back to the neutral cue so silent themes (Minimal) still cue.
+                let url = useDefaultSet
+                    ? DefaultSounds.url(for: transition)
+                    : (theme.sound(for: transition) ?? DefaultSounds.url(for: transition))
+                SoundManager.shared.play(url)
             }
             lastStatus[s.fullID] = s.status
         }

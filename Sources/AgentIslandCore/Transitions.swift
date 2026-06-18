@@ -31,6 +31,23 @@ public enum TransitionDetector {
     }
 }
 
+/// The neutral, non-theme lifecycle cue set: a pure transition→clip-name mapping. The App target
+/// resolves these names to bundled WAVs (under `Themes/Default/`); kept here, framework-free, so the
+/// self-test can pin the mapping. `nil` means "no cue for this transition" (matching JourneyTheme,
+/// which is also silent on `.unknown`).
+public enum DefaultSoundSet {
+    /// The clip base-name for a transition, or `nil` for silence.
+    public static func clipName(for transition: SoundTransition) -> String? {
+        switch transition {
+        case .startedWorking:            return "started"
+        case .enteredWaiting:            return "waiting"
+        case .enteredFinished(.success): return "finished_ok"
+        case .enteredFinished(.failed):  return "finished_fail"
+        case .enteredFinished(.unknown): return nil
+        }
+    }
+}
+
 /// Time-based gate so a burst of transitions on one refresh tick doesn't fire overlapping clips.
 public enum PlayThrottle {
     /// True if a new clip may start: at least `cooldown` seconds since the last play.
