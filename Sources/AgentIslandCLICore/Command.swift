@@ -19,6 +19,7 @@ public enum Command: Equatable {
     case update                                 // `update`
     case uninstall(yes: Bool, dryRun: Bool, purge: Bool)  // `uninstall [--yes] [--dry-run] [--purge]`
     case startOnBoot(StartOnBootAction)         // `start-on-boot [on|off|status]`
+    case daemon(DaemonAction)                   // `daemon [status|stop|restart]`
     case unknown(String)                        // an unrecognized first token
     case usageError(String)                     // a recognized command with the wrong/missing args
 }
@@ -27,6 +28,12 @@ public enum Command: Equatable {
 /// silently toggles the login item).
 public enum StartOnBootAction: Equatable {
     case on, off, status
+}
+
+/// `daemon` verbs: report status, KILL any (dangling) `agentislandd`, or kill-then-respawn. A bare
+/// `daemon` defaults to `status` (read-only — never silently kills).
+public enum DaemonAction: Equatable {
+    case status, stop, restart
 }
 
 public enum CommandParser {
@@ -52,6 +59,8 @@ public enum CommandParser {
             return parseUninstall(rest)
         case "start-on-boot":
             return parseStartOnBoot(rest)
+        case "daemon":
+            return parseDaemon(rest)
         default:
             return .unknown(first)
         }
@@ -112,6 +121,17 @@ public enum CommandParser {
         case "off": return .startOnBoot(.off)
         case "status": return .startOnBoot(.status)
         default: return .usageError("unknown start-on-boot verb '\(verb)' (try: on, off, status)")
+        }
+    }
+
+    private static func parseDaemon(_ args: [String]) -> Command {
+        guard let verb = args.first else { return .daemon(.status) }   // bare → status (read-only)
+        guard args.count == 1 else { return .usageError("usage: agentisland daemon [status|stop|restart]") }
+        switch verb {
+        case "status": return .daemon(.status)
+        case "stop", "kill", "--stop": return .daemon(.stop)
+        case "restart", "--restart": return .daemon(.restart)
+        default: return .usageError("unknown daemon verb '\(verb)' (try: status, stop, restart)")
         }
     }
 }

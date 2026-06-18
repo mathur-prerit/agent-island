@@ -23,6 +23,7 @@ public enum Help {
           config set <key> <value>   Set one preference (validated against the allowlist)
           update                     Check for a newer release; offer to update in place
           start-on-boot [on|off|status]  Launch agent-island at login (login item; default: status)
+          daemon [status|stop|restart]   Inspect / kill a dangling agentislandd, or kill + respawn it
           uninstall [--yes] [--dry-run] [--purge]  Remove hooks, login item, the app + ~/.agent-island
                                      (KEEPS your custom themes by default; --purge wipes those too)
           version                    Print the CLI version

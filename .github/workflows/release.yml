@@ -51,13 +51,18 @@ jobs:
           swift build -c release --product agentisland
 
       - name: Smoke-test the packaged app (must not crash on the bundled-themes path)
-        # Runs the PACKAGED executable through the headless theme renderer, which exercises
-        # Bundle.module → ManifestThemeDiscovery → Themes.all — the exact path that fatal-errors if the
-        # SwiftPM resource bundle wasn't copied into the .app. Fails the release if the app would crash
-        # on launch, so a broken bundle can never ship again.
+        # Two guards against the Bundle.module launch crash:
+        #  (1) the SwiftPM resource bundle MUST sit at the .app ROOT (where Bundle.module resolves it).
+        #  (2) run the PACKAGED exec through the themes path (Bundle.module → Themes.all) with `.build`
+        #      HIDDEN — otherwise Bundle.module's baked-in `.build/` fallback resolves on the CI runner
+        #      and a MISPLACED bundle false-passes here while crashing OFF the build machine (the v0.3.3
+        #      bug). Hiding .build makes this match a real user's machine.
         run: |
-          build/AgentIsland.app/Contents/MacOS/AgentIslandApp -renderTheme journey "$RUNNER_TEMP/smoke.png"
-          test -s "$RUNNER_TEMP/smoke.png"
+          test -d "build/AgentIsland.app/AgentIsland_AgentIslandApp.bundle"
+          mv .build .build.hidden
+          if build/AgentIsland.app/Contents/MacOS/AgentIslandApp -renderTheme journey "$RUNNER_TEMP/smoke.png"; then rc=0; else rc=$?; fi
+          mv .build.hidden .build
+          test "$rc" -eq 0 && test -s "$RUNNER_TEMP/smoke.png"
 
       - name: Ad-hoc codesign the app
         # Not Developer-ID/notarized — install.sh also strips quarantine on download. Ad-hoc signing keeps
