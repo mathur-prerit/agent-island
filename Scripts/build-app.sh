@@ -15,7 +15,7 @@ cd "$ROOT"
 # version a bare `swift run AgentIslandApp` reports (no bundle plist), so they must agree.
 # Overridable so the release CI can stamp the git tag into the plist (VERSION=${TAG#v} bash build-app.sh).
 # Keep the 0.3.0 fallback in lockstep with CLIConstants.version + the AppInfo.version fallback.
-VERSION="${VERSION:-0.3.2}"
+VERSION="${VERSION:-0.3.3}"
 
 echo "Building AgentIslandApp + daemon + hook bridge + management CLI (release)…"
 swift build -c release --product AgentIslandApp
@@ -38,6 +38,19 @@ cp "$ROOT/.build/release/AgentIslandApp" "$APP/Contents/MacOS/AgentIslandApp"
 cp "$ROOT/.build/release/agentislandd" "$APP/Contents/MacOS/agentislandd"
 cp "$ROOT/.build/release/AgentIslandHookCLI" "$APP/Contents/MacOS/AgentIslandHookCLI"
 cp "$ROOT/.build/release/agentisland" "$APP/Contents/MacOS/agentisland"
+
+# CRITICAL: copy the SwiftPM resource bundle into the .app. AgentIslandApp uses `.copy` resources
+# (the bundled themes + sounds), so SwiftPM generates `<Package>_<Target>.bundle` and `Bundle.module`
+# resolves to it. Under `swift run` it sits next to the binary in .build/, but a packaged .app must
+# CARRY it in Contents/Resources — otherwise `Bundle.module` FATAL-ERRORS the instant the app touches a
+# bundled theme (ManifestThemeDiscovery.bundled() → Themes.all → IslandPanel.init at launch). The bundle
+# name is `<PackageName>_<TargetName>.bundle` = `AgentIsland_AgentIslandApp.bundle`.
+RES_BUNDLE="$ROOT/.build/release/AgentIsland_AgentIslandApp.bundle"
+if [ -d "$RES_BUNDLE" ]; then
+  cp -R "$RES_BUNDLE" "$APP/Contents/Resources/"
+else
+  echo "warning: resource bundle not found at $RES_BUNDLE — bundled themes won't load (the app may crash)" >&2
+fi
 
 # --- App icon ----------------------------------------------------------------
 # Generate AppIcon.icns at build time from the committed 1024px master (one source of truth, no drifting
