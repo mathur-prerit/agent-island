@@ -36,9 +36,9 @@ struct JourneyTheme: IslandTheme {
     /// Resolve a bundled clip. Tries the likely subdirectory layouts SwiftPM's `.copy` may produce,
     /// then a flat lookup — robust to how the resource folder lands in the bundle.
     private static func clip(_ name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "RoadRunner")
-            ?? Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Themes/RoadRunner")
-            ?? Bundle.module.url(forResource: name, withExtension: "wav")
+        AppResources.bundle.url(forResource: name, withExtension: "wav", subdirectory: "RoadRunner")
+            ?? AppResources.bundle.url(forResource: name, withExtension: "wav", subdirectory: "Themes/RoadRunner")
+            ?? AppResources.bundle.url(forResource: name, withExtension: "wav")
     }
 }
 

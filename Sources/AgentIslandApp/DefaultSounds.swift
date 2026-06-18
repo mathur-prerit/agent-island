@@ -23,8 +23,8 @@ enum DefaultSounds {
     /// Resolve a bundled clip. Mirrors JourneyTheme's fallback chain (the `.copy` folder may land at
     /// a couple of layouts in the bundle), then a flat lookup — robust to SwiftPM's resource layout.
     private static func clip(_ name: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Default")
-            ?? Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Themes/Default")
-            ?? Bundle.module.url(forResource: name, withExtension: "wav")
+        AppResources.bundle.url(forResource: name, withExtension: "wav", subdirectory: "Default")
+            ?? AppResources.bundle.url(forResource: name, withExtension: "wav", subdirectory: "Themes/Default")
+            ?? AppResources.bundle.url(forResource: name, withExtension: "wav")
     }
 }

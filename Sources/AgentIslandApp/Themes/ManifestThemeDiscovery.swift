@@ -42,7 +42,7 @@ enum ManifestThemeDiscovery {
     private static func bundled() -> [ManifestTheme] {
         bundledIDs.compactMap { id in
             // nil-guard: a missing bundled folder simply yields no theme (code themes unaffected).
-            guard let jsonURL = Bundle.module.url(forResource: "theme", withExtension: "json", subdirectory: id)
+            guard let jsonURL = AppResources.bundle.url(forResource: "theme", withExtension: "json", subdirectory: id)
             else { return nil }
             return loadTheme(jsonURL: jsonURL, folderName: id)
         }

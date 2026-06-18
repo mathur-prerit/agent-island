@@ -39,17 +39,19 @@ cp "$ROOT/.build/release/agentislandd" "$APP/Contents/MacOS/agentislandd"
 cp "$ROOT/.build/release/AgentIslandHookCLI" "$APP/Contents/MacOS/AgentIslandHookCLI"
 cp "$ROOT/.build/release/agentisland" "$APP/Contents/MacOS/agentisland"
 
-# CRITICAL: copy the SwiftPM resource bundle to the .app ROOT (NOT Contents/Resources). AgentIslandApp
-# uses `.copy` resources (bundled themes + sounds), so SwiftPM generates `<Package>_<Target>.bundle` and
-# `Bundle.module` resolves it from `Bundle.main.bundleURL/<name>.bundle` — i.e. the .app root, beside
-# Contents/. Put it anywhere else (e.g. Contents/Resources) and `Bundle.module` FATAL-ERRORS at launch
-# (ManifestThemeDiscovery.bundled() → Themes.all → IslandPanel.init). The bundle name is
-# `<PackageName>_<TargetName>.bundle` = `AgentIsland_AgentIslandApp.bundle`. (`swift run` finds it next to
-# the binary in .build/; the .build path is also baked in as a fallback, which is why it only crashes
-# OFF the build machine — see the release.yml smoke test that hides .build to catch this.)
+# CRITICAL: copy the SwiftPM resource bundle into Contents/Resources (NOT the .app root). AgentIslandApp
+# uses `.copy` resources (bundled themes + sounds), so SwiftPM generates `<Package>_<Target>.bundle` =
+# `AgentIsland_AgentIslandApp.bundle`. Two macOS rules collide here:
+#   • SwiftPM's stock `Bundle.module` only resolves it from the .app ROOT (Bundle.main.bundleURL/<name>).
+#   • `codesign` FORBIDS any non-Contents/ item at the .app root ("unsealed contents present in the bundle
+#     root") — putting the bundle at the root makes the release CI's codesign step fail on macos-13/14.
+# So we ship it in the standard Contents/Resources and resolve it ourselves at runtime via
+# `AppResources.bundle` (AppResources.swift), which prefers Contents/Resources and falls back to root +
+# Bundle.module. (`swift run`/self-test find it via Bundle.module's baked-in .build/ path; the release.yml
+# smoke test hides .build so a MISPLACED bundle can't false-pass on the build machine.)
 RES_BUNDLE="$ROOT/.build/release/AgentIsland_AgentIslandApp.bundle"
 if [ -d "$RES_BUNDLE" ]; then
-  cp -R "$RES_BUNDLE" "$APP/"
+  cp -R "$RES_BUNDLE" "$APP/Contents/Resources/"
 else
   echo "warning: resource bundle not found at $RES_BUNDLE — bundled themes won't load (the app WILL crash)" >&2
 fi
