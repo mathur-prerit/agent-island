@@ -608,6 +608,13 @@ if let i = CommandLine.arguments.firstIndex(of: "-renderRoadSample"),
     exit(0)
 }
 
+// Dev-only: `-renderTheme <id> <path>` renders every state of any theme (code or data) to a PNG.
+if let i = CommandLine.arguments.firstIndex(of: "-renderTheme"),
+   i + 2 < CommandLine.arguments.count {
+    ThemeSampleRenderer.render(themeID: CommandLine.arguments[i + 1], to: CommandLine.arguments[i + 2])
+    exit(0)
+}
+
 let controller = AppController()
 controller.start()
 app.run()

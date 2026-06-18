@@ -20,7 +20,10 @@ A sandboxed SwiftPM app can't load downloaded Swift code, so themes come in two 
    - `MinimalTheme.swift` — **Minimal (CLI)** (id `minimal`): braille spinner / caret / ✓ / ✗.
 2. **Data themes** — a declarative `theme.json` manifest + asset files (images, sprite sheets,
    sounds). No Swift. One generic interpreter renders any such folder. These are the ones that can
-   be **bundled or downloaded**. _(Engine not built yet — see backlog `theme-manifest-engine.md`.)_
+   be **bundled or downloaded**. The engine is the `AgentIslandThemes` target (AppKit-free
+   `ThemeManifest` + strict, path-safe `ThemeManifestLoader`) plus the App-side `ManifestTheme` /
+   `ManifestScene` interpreter; themes are discovered by `ManifestThemeDiscovery`. The bundled
+   **`critter`** theme (id `critter`, in `Themes/critter/`) is the worked example.
 
 The same `Themes/<id>/` folder shape is used whether a data theme is **bundled** (read via
 `Bundle.module`) or **downloaded** to `~/.agent-island/themes/<id>/` (read at runtime). Code themes
@@ -99,6 +102,12 @@ waits for you) / goal (success) / game-over (failure).
   `waitingTurnEnd`, `failed`, `finished`. They mirror the host's row state machine.
 - **`visual.kind`**: `image` (static), `sprite` (sheet sliced `frameWidth × frameHeight`, animated
   at `fps`, `frameCount` frames), `text` (monospace string + colour), `symbol` (SF Symbol + tint).
+  Sprite `frameWidth/frameHeight` are **pixel** measurements of a **1× sheet** (a single horizontal
+  strip of `frameCount` cells); export at 1× so the slicer's cells line up. Sprite dimensions are
+  bounded (frame ≤ 4096², `frameCount` ≤ 1024, `fps` ≤ 240) — larger is rejected.
+- **`system:<name>`** must name a supported colour (`ThemeColorNames.system`): the system palette
+  (`red orange yellow green mint teal cyan blue indigo purple pink brown gray`) or a semantic label
+  (`label secondaryLabel tertiaryLabel quaternaryLabel`). An unknown name is rejected at load.
 - **`sound.trigger`**: `onEnter` (fire once when the state begins) | `loop`. `volume` 0–1.
 - **Colour refs**: `#RRGGBB[AA]` · a `palette` name · `system:<name>` (an `NSColor.system*`) · `clear`.
 
@@ -124,13 +133,20 @@ Themes/<id>/
   `Bundle.module` under both `swift run` and a packaged `.app`.
 - **Test**: `swift run AgentIslandSelfTest` (framework-free). Manifest decode/validation + the
   transition/throttle logic are covered there; NSView rendering is verified by eye.
-- **Render canary**: `swift run AgentIslandApp -renderRoadSample /tmp/road.png` (Road-Runner-specific).
-- **Install a local data theme** (once the engine ships): drop the folder into
-  `~/.agent-island/themes/<id>/` and pick it from the menu.
+- **Render canary**: `swift run AgentIslandApp -renderTheme <id> /tmp/out.png` renders all six states
+  of ANY theme (code or data) to a labelled PNG strip — the headless way to eyeball a theme. (The
+  older `-renderRoadSample /tmp/road.png` stays as the Road-Runner-specific banner-grid canary.)
+- **Install a local data theme**: drop the folder into `~/.agent-island/themes/<id>/` (the folder
+  name must equal the manifest `id`) and pick it from the menu. Asset paths are validated twice — a
+  string check at load (rejects `..`/absolute) and a disk-side symlink-containment check at open, so
+  a downloaded theme can't read outside its own folder.
 
-## TODO themes
+## Themes
 
-- [ ] **`mario`** — data theme. Running Mario sprite while working; `?`-block on waiting; coin/jump
-  on milestone; flagpole on goal; game-over jingle on failure. Accent `#E52521`.
-- [ ] **`the-witcher`** — data theme. Medieval palette; torch/medallion imagery; per-state sounds
-  (sword draw on permission, quest-complete on goal). Needs the manifest engine + (ideally) download.
+- [x] **`critter`** — bundled data theme; the worked example proving the engine. Original pixel art
+  (a blobby slime): a 4-frame bounce sprite while working, a `!`-antenna image on a permission wait,
+  `zZ` text on a turn-end wait, SF-Symbol ✓/✗ for finished/failed, a `·` when idle, and a short
+  chirp on start. All art is original (generated), not derived from any existing character.
+- [ ] **`mario` / `the-witcher`** — named themes from the original vision use copyrighted game art
+  and so can't ship bundled. They belong as **downloadable community themes** once
+  `theme-download.md` ships (the manifest engine they needed is now in place).
