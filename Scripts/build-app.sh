@@ -15,7 +15,7 @@ cd "$ROOT"
 # version a bare `swift run AgentIslandApp` reports (no bundle plist), so they must agree.
 # Overridable so the release CI can stamp the git tag into the plist (VERSION=${TAG#v} bash build-app.sh).
 # Keep the 0.3.0 fallback in lockstep with CLIConstants.version + the AppInfo.version fallback.
-VERSION="${VERSION:-0.3.1}"
+VERSION="${VERSION:-0.3.2}"
 
 echo "Building AgentIslandApp + daemon + hook bridge + management CLI (release)…"
 swift build -c release --product AgentIslandApp
