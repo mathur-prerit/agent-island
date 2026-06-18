@@ -44,8 +44,8 @@ case .configSet(let key, let value):
 case .update:
     exit(UpdateCommand.run() ? 0 : 1)
 
-case .uninstall(let yes, let dryRun):
-    exit(UninstallCommand.run(yes: yes, dryRun: dryRun) ? 0 : 1)
+case .uninstall(let yes, let dryRun, let purge):
+    exit(UninstallCommand.run(yes: yes, dryRun: dryRun, purge: purge) ? 0 : 1)
 
 case .startOnBoot(let action):
     exit(StartOnBootCommand.run(action) ? 0 : 1)

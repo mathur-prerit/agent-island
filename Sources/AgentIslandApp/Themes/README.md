@@ -136,10 +136,12 @@ Themes/<id>/
 - **Render canary**: `swift run AgentIslandApp -renderTheme <id> /tmp/out.png` renders all six states
   of ANY theme (code or data) to a labelled PNG strip — the headless way to eyeball a theme. (The
   older `-renderRoadSample /tmp/road.png` stays as the Road-Runner-specific banner-grid canary.)
-- **Install a local data theme**: drop the folder into `~/.agent-island/themes/<id>/` (the folder
-  name must equal the manifest `id`) and pick it from the menu. Asset paths are validated twice — a
-  string check at load (rejects `..`/absolute) and a disk-side symlink-containment check at open, so
-  a downloaded theme can't read outside its own folder.
+- **Install a local data theme**: `agentisland theme add ./my-theme` (a folder you authored) or
+  `agentisland theme add ./my-theme.zip` runs it through the validated install pipeline and lands it in
+  `~/.agent-island/themes/<id>/`; or drop the folder there yourself (the folder name must equal the
+  manifest `id`) and pick it from the menu. Your custom local themes **survive `agentisland uninstall`**
+  (use `--purge` to remove them too). Asset paths are validated twice — a string check at load (rejects
+  `..`/absolute) and a disk-side symlink-containment check at open, so a theme can't read outside its folder.
 
 ## Themes
 

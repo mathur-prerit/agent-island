@@ -15,14 +15,16 @@ public enum Help {
 
         COMMANDS:
           theme list                 List installed + bundled + downloadable themes
-          theme add <id|url>         Download + install a theme (id from the catalog, or an https zip url)
+          theme add <id|url|path>    Install a theme: a catalog id, an https zip url, or a LOCAL path
+                                     (your own theme folder or a .zip on disk)
           theme set <id>             Make <id> the active theme (writes the app's preference)
           config                     List the settable preferences and their current values
           config get <key>           Print one preference's current value
           config set <key> <value>   Set one preference (validated against the allowlist)
           update                     Check for a newer release; offer to update in place
           start-on-boot [on|off|status]  Launch agent-island at login (login item; default: status)
-          uninstall [--yes] [--dry-run]  Remove hooks, the login item, ~/.agent-island, and the app
+          uninstall [--yes] [--dry-run] [--purge]  Remove hooks, login item, the app + ~/.agent-island
+                                     (KEEPS your custom themes by default; --purge wipes those too)
           version                    Print the CLI version
           help                       Show this help
 

@@ -75,14 +75,57 @@ enum ThemeCommands {
     /// In BOTH cases the bytes flow into `ThemeInstaller.installFromLocalZip` — all validation/extraction
     /// is the shared pipeline. Returns true on a clean install.
     static func add(_ idOrURL: String) -> Bool {
+        // A LOCAL path (a theme folder you authored, or a .zip on disk) installs from disk — checked
+        // first so a path is never mis-classified as a catalog id. Everything else: catalog id / https url.
+        let fm = FileManager.default
+        let local = (idOrURL as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: local, isDirectory: &isDir) {
+            return isDir.boolValue ? addFromLocalDir(local) : addFromLocalZip(local)
+        }
         guard let target = ThemeAdd.classify(idOrURL) else {
-            errOut("agentisland: '\(idOrURL)' isn't a safe theme id or an https url")
+            errOut("agentisland: '\(idOrURL)' isn't a local path, a safe theme id, or an https url")
             return false
         }
         switch target {
         case .catalogID(let id): return addFromCatalog(id)
         case .directURL(let url): return addFromURL(url)
         }
+    }
+
+    /// Install a theme from a local FOLDER you authored (`theme.json` + assets). Zips it with ditto and
+    /// feeds it through the SAME validated pipeline as a download — no separate, less-checked folder path.
+    private static func addFromLocalDir(_ path: String) -> Bool {
+        guard let data = zipDirectory(path) else {
+            errOut("agentisland: couldn't package the theme folder \(path)")
+            return false
+        }
+        return installLocalBytes(data, source: path)
+    }
+
+    /// Install a theme from a local `.zip` on disk.
+    private static func addFromLocalZip(_ path: String) -> Bool {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            errOut("agentisland: couldn't read \(path)")
+            return false
+        }
+        return installLocalBytes(data, source: path)
+    }
+
+    /// Zip a directory to in-memory bytes via ditto (the same engine the installer extracts with). The
+    /// archive keeps the folder as its top entry; the installer's `locateThemeRoot` finds the theme.json.
+    private static func zipDirectory(_ path: String) -> Data? {
+        let fm = FileManager.default
+        let out = fm.temporaryDirectory.appendingPathComponent("agentisland-pack-\(UUID().uuidString).zip")
+        defer { try? fm.removeItem(at: out) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        p.arguments = ["-c", "-k", "--keepParent", path, out.path]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        return try? Data(contentsOf: out)
     }
 
     private static func addFromCatalog(_ id: String) -> Bool {
@@ -102,18 +145,23 @@ enum ThemeCommands {
 
     private static func addFromURL(_ url: String) -> Bool {
         guard let data = downloadBody(url) else { return false }
-        // Peek the manifest id from the archive by running the SAME extraction the installer uses, then
-        // re-install for real with an entry whose id == that manifest id (the loader enforces id ==
-        // folder name). No validation is bypassed: the real install below re-runs every gate.
+        return installLocalBytes(data, source: url)
+    }
+
+    /// Install theme bytes already in hand (a download, a local `.zip`, or a zipped local folder): peek
+    /// the manifest id from the archive (the SAME extraction the installer uses), then re-install for
+    /// real with an entry whose id == that manifest id (the loader enforces id == folder name). No
+    /// validation is bypassed — `runSharedInstall` re-runs every security gate; this only learns the id.
+    private static func installLocalBytes(_ data: Data, source: String) -> Bool {
         guard let id = peekManifestID(zipData: data) else {
-            errOut("agentisland: couldn't read a theme.json id from \(url)")
+            errOut("agentisland: couldn't read a theme.json id from \(source)")
             return false
         }
         guard ThemeCatalogEntry.isSafeID(id) else {
             errOut("agentisland: the theme's id '\(id)' isn't a safe install folder name")
             return false
         }
-        let entry = ThemeAdd.selfVerifyingEntry(id: id, url: url, data: data)
+        let entry = ThemeAdd.selfVerifyingEntry(id: id, url: source, data: data)
         return runSharedInstall(entry: entry, data: data)
     }
 

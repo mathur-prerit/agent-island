@@ -1138,11 +1138,13 @@ check({ if case .usageError = CommandParser.parse(["config", "set", "onlyKey"]) 
 check(CommandParser.parse(["update"]) == .update, "cli-parse: update")
 check({ if case .usageError = CommandParser.parse(["update", "now"]) { return true }; return false }(),
       "cli-parse: update with extra arg -> usageError")
-check(CommandParser.parse(["uninstall"]) == .uninstall(yes: false, dryRun: false), "cli-parse: uninstall (no flags)")
-check(CommandParser.parse(["uninstall", "--yes"]) == .uninstall(yes: true, dryRun: false), "cli-parse: uninstall --yes")
-check(CommandParser.parse(["uninstall", "--dry-run"]) == .uninstall(yes: false, dryRun: true), "cli-parse: uninstall --dry-run")
-check(CommandParser.parse(["uninstall", "--yes", "--dry-run"]) == .uninstall(yes: true, dryRun: true),
+check(CommandParser.parse(["uninstall"]) == .uninstall(yes: false, dryRun: false, purge: false), "cli-parse: uninstall (no flags)")
+check(CommandParser.parse(["uninstall", "--yes"]) == .uninstall(yes: true, dryRun: false, purge: false), "cli-parse: uninstall --yes")
+check(CommandParser.parse(["uninstall", "--dry-run"]) == .uninstall(yes: false, dryRun: true, purge: false), "cli-parse: uninstall --dry-run")
+check(CommandParser.parse(["uninstall", "--yes", "--dry-run"]) == .uninstall(yes: true, dryRun: true, purge: false),
       "cli-parse: uninstall --yes --dry-run")
+check(CommandParser.parse(["uninstall", "--purge"]) == .uninstall(yes: false, dryRun: false, purge: true),
+      "cli-parse: uninstall --purge (wipe custom themes too)")
 check({ if case .usageError = CommandParser.parse(["uninstall", "--force"]) { return true }; return false }(),
       "cli-parse: uninstall unknown flag -> usageError")
 check(CommandParser.parse(["start-on-boot"]) == .startOnBoot(.status), "cli-parse: bare start-on-boot -> status")
@@ -1186,8 +1188,14 @@ let cliPlan = UninstallPlan.plan(cliPaths)
 check(cliPlan.first == .reverseHooks(settingsPath: cliSandboxHome + "/.claude/settings.json"),
       "cli-uninstall: plan reverses hooks FIRST (so a half-done uninstall still works)")
 check(cliPlan.contains(.unregisterLoginItem), "cli-uninstall: plan unregisters the login item")
-check(cliPlan.contains(.removeDirectory(path: cliSandboxHome + "/.agent-island")),
-      "cli-uninstall: plan removes ~/.agent-island")
+check(cliPlan.contains(.removeDataKeepingThemes(path: cliSandboxHome + "/.agent-island")),
+      "cli-uninstall: default plan removes ~/.agent-island but KEEPS custom themes (themes/)")
+// --purge wipes the whole data dir (custom themes included) for a true clean slate.
+let cliPurgePlan = UninstallPlan.plan(cliPaths, purge: true)
+check(cliPurgePlan.contains(.removeDirectory(path: cliSandboxHome + "/.agent-island")),
+      "cli-uninstall: --purge removes the whole ~/.agent-island (themes too)")
+check(!cliPurgePlan.contains(.removeDataKeepingThemes(path: cliSandboxHome + "/.agent-island")),
+      "cli-uninstall: --purge does NOT use the keep-themes action")
 check(cliPlan.contains(.removeApp(path: cliSandboxHome + "/App/AgentIsland.app")),
       "cli-uninstall: plan removes the .app")
 check(cliPlan.contains(.removeBinary(path: cliSandboxHome + "/bin/agentisland")),
@@ -1197,7 +1205,8 @@ check(cliPlan.contains(.removeBinary(path: cliSandboxHome + "/bin/agentisland-ho
 // CRITICAL: every path the plan targets stays UNDER the (sandbox) home — never the real system.
 let homeDerived: [String?] = cliPlan.map { action in
     switch action {
-    case .reverseHooks(let p), .removeBinary(let p), .removeDirectory(let p), .removeApp(let p): return p
+    case .reverseHooks(let p), .removeBinary(let p), .removeDirectory(let p),
+         .removeDataKeepingThemes(let p), .removeApp(let p): return p
     case .unregisterLoginItem: return nil
     }
 }
