@@ -34,6 +34,15 @@ final class AppController: NSObject, NSMenuDelegate {
     // user toggles it, and when the menu is about to open (menuWillOpen) — where freshness actually matters.
     private var loginItemEnabled = false
 
+    // Sweeping-beam animation for the menu-bar lighthouse. A ~12fps ticker runs ONLY while a session is
+    // working/waiting (and Reduce Motion is off); idle/finished show clear sky and cost nothing. The
+    // status draw inputs are cached so the ticker can redraw frames without re-deriving session state.
+    private var beamTimer: Timer?
+    private var beamFrame = 0
+    private var statusLamp: NSColor = .secondaryLabelColor
+    private var statusBeamActive = false
+    private var statusShowDot = false
+
     // Click-to-focus: the owning terminal's window identity per session (keyed by fullID), captured
     // at SessionStart by the hook and carried in the daemon snapshot. Empty in polling mode.
     private struct WindowIdentity { let termProgram: String?; let itermSessionID: String?; let bundleID: String? }
@@ -282,13 +291,15 @@ final class AppController: NSObject, NSMenuDelegate {
         else if working { tintColor = .systemTeal; countText = "" }
         else if finishedPresent { tintColor = .systemGreen; countText = "" }
         else { tintColor = .secondaryLabelColor; countText = "" }
+        // The lamp/beam carry the state colour on a neutral (labelColor) lighthouse; the beam lights and
+        // SWEEPS only while actively working or waiting (idle/finished are calm). Cache the inputs, draw a
+        // frame now, then start/stop the sweep ticker.
+        statusLamp = tintColor
+        statusBeamActive = working || waiting > 0
+        statusShowDot = updateCue && waiting == 0 && !working && !finishedPresent
+        applyStatusImage()
+        updateBeamTimer()
         if let button = statusItem.button {
-            // The lamp/beam carry the state colour on a neutral (labelColor) lighthouse; the beam lights
-            // only while actively working or waiting (idle/finished are calm).
-            button.image = IslandIcons.lighthouse(
-                lamp: tintColor, beam: working || waiting > 0,
-                showUpdateDot: updateCue && waiting == 0 && !working && !finishedPresent)
-            button.imagePosition = .imageLeading
             // The waiting count rides as text beside the icon (variableLength sizes the item to fit);
             // a leading space gives a small gap. Empty otherwise so the item stays icon-only.
             button.attributedTitle = NSAttributedString(
@@ -391,6 +402,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
     @objc private func quit() {
         if let token = sleepToken { ProcessInfo.processInfo.endActivity(token); sleepToken = nil }
+        beamTimer?.invalidate(); beamTimer = nil
         NSApplication.shared.terminate(nil)
     }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
@@ -525,6 +537,37 @@ final class AppController: NSObject, NSMenuDelegate {
     private func openLoginItemsSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Draw the current menu-bar lighthouse frame. While working/waiting (and motion is allowed) the beam
+    /// sweeps via `beamFrame`; otherwise it's a static frame (Reduce Motion → no sweep).
+    private func applyStatusImage() {
+        guard let button = statusItem.button else { return }
+        let animating = statusBeamActive && !IslandAnimations.reduceMotion
+        let phase: CGFloat? = animating ? CGFloat(beamFrame % 36) / 36.0 : nil
+        button.image = IslandIcons.lighthouse(lamp: statusLamp, beam: statusBeamActive,
+                                              beamPhase: phase, showUpdateDot: statusShowDot)
+        button.imagePosition = .imageLeading
+    }
+
+    /// Run a ~12fps ticker ONLY while the beam should sweep (a session working/waiting, motion allowed);
+    /// stop it otherwise so an idle menu bar costs nothing. Registered in `.common` so it keeps sweeping
+    /// even while the menu is open.
+    private func updateBeamTimer() {
+        let animating = statusBeamActive && !IslandAnimations.reduceMotion
+        if animating {
+            if beamTimer == nil {
+                let t = Timer(timeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.beamFrame &+= 1
+                    self.applyStatusImage()
+                }
+                RunLoop.main.add(t, forMode: .common)
+                beamTimer = t
+            }
+        } else if beamTimer != nil {
+            beamTimer?.invalidate(); beamTimer = nil; beamFrame = 0
         }
     }
 
