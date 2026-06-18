@@ -132,7 +132,7 @@ Notes that keep it honest:
 
 A **theme** decides what each session's status indicator looks (and sounds) like per state — idle / working / waiting / finished / failed — plus the row's background tint and any lifecycle sounds. There are two kinds; you author the **data** kind (no Swift, no compiling):
 
-- **Code themes** are compiled into the app (e.g. *Road Trip*'s scrolling token journey, or *Pixel Jumper*'s side-scrolling platformer). Adding one means a Swift file — see the spec below.
+- **Code themes** are compiled into the app (e.g. *Road Trip*'s scrolling token journey). Adding one means a Swift file — see the spec below.
 - **Data themes** are a declarative `theme.json` + asset files (images, sprite sheets, sounds). One generic interpreter renders any such folder, so they can be **bundled, installed locally, or downloaded**. This is what you make.
 
 ### 1. Lay out the folder

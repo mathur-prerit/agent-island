@@ -52,8 +52,7 @@ let package = Package(
             // structure verbatim so relative lookups resolve. The theme-spec doc is source-tree
             // docs, not a runtime resource — exclude it so SwiftPM doesn't warn/bundle it.
             exclude: ["Themes/README.md"],
-            resources: [.copy("Themes/RoadRunner"), .copy("Themes/Default"), .copy("Themes/critter"),
-                        .copy("Themes/PixelJumper")]),
+            resources: [.copy("Themes/RoadRunner"), .copy("Themes/Default"), .copy("Themes/critter")]),
         .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
         // The management CLI: pure logic in AgentIslandCLICore; reuses HookInstall (hook reversal) and
         // AgentIslandThemes (the shared validated theme install + semver/release-feed) for the effects.

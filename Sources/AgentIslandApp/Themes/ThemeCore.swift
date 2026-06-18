@@ -66,7 +66,7 @@ extension IslandTheme {
 enum Themes {
     /// Built-in CODE themes — always first, so the default (index 0) stays the road journey (`journey`).
     /// A code theme can do anything Core Graphics can; data themes are appended after these.
-    static let codeThemes: [IslandTheme] = [JourneyTheme(), PixelJumperTheme(), MinimalTheme()]
+    static let codeThemes: [IslandTheme] = [JourneyTheme(), MinimalTheme()]
 
     private static var discovered: [IslandTheme] = []
     private static var didLoad = false

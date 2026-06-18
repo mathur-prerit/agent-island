@@ -17,9 +17,6 @@ A sandboxed SwiftPM app can't load downloaded Swift code, so themes come in two 
    do anything Core Graphics can (the Road Trip theme animates a scrolling token journey that no
    static manifest could express). Registered in `Themes.all` in `ThemeCore.swift`.
    - `JourneyTheme.swift` — **Road Trip** (id `journey`): the token-burn journey + arcade sounds.
-   - `PixelJumperTheme.swift` — **Pixel Jumper** (id `jumper`): a side-scrolling platformer — a blocky
-     runner hops the token course, upgrades through power tiers, original synthesized 8-bit cues. All
-     art is drawn procedurally and all sounds are synthesized in-repo (no third-party assets).
    - `MinimalTheme.swift` — **Minimal (CLI)** (id `minimal`): braille spinner / caret / ✓ / ✗.
 2. **Data themes** — a declarative `theme.json` manifest + asset files (images, sprite sheets,
    sounds). No Swift. One generic interpreter renders any such folder. These are the ones that can
@@ -148,12 +145,6 @@ Themes/<id>/
 
 - [x] **`journey`** — **Road Trip** code theme (renamed from "Road Runner"): a token-burn journey, a
   vehicle upgrading bike→car→train→plane past milestone signs, with an arcade lifecycle sound set.
-- [x] **`jumper`** — **Pixel Jumper** code theme: a side-scrolling platformer. A blocky runner hops the
-  scrolling token course (coins + obstacle blocks), upgrades through three power tiers (recolour + grow
-  + a star), and a base token bar fills toward the next tier. All art is drawn procedurally; the four
-  lifecycle cues (start / waiting / complete / game-over) are **original synthesized 8-bit tones** —
-  generic note sequences, not transcriptions — so nothing third-party ships. The retro *feel* of a
-  classic platformer, none of the copyrighted assets.
 - [x] **`critter`** — bundled data theme; the worked example proving the engine. Original pixel art
   (a blobby slime): a 4-frame bounce sprite while working, a `!`-antenna image on a permission wait,
   `zZ` text on a turn-end wait, SF-Symbol ✓/✗ for finished/failed, a `·` when idle, and a short
