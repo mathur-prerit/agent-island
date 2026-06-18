@@ -53,14 +53,18 @@ protocol IslandTheme {
     /// The sound clip to play for a lifecycle transition (a theme jingle), or `nil` for silence.
     /// Default: silent — a theme opts in by overriding (only Road Runner does today).
     func sound(for transition: SoundTransition) -> URL?
+    /// A small badge shown beside the theme's name in the "Animation theme" picker — its logo.
+    /// Default: a generic palette symbol; each theme overrides with a fitting mark.
+    func icon() -> NSImage
 }
 
 extension IslandTheme {
     func sound(for transition: SoundTransition) -> URL? { nil }
+    func icon() -> NSImage { IslandIcons.symbol("paintpalette", pointSize: 12) }
 }
 
 enum Themes {
-    /// Built-in CODE themes — always first, so the default (index 0) stays Road Runner (`journey`).
+    /// Built-in CODE themes — always first, so the default (index 0) stays the road journey (`journey`).
     /// A code theme can do anything Core Graphics can; data themes are appended after these.
     static let codeThemes: [IslandTheme] = [JourneyTheme(), MinimalTheme()]
 

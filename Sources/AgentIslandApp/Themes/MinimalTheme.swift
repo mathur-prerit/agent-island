@@ -11,6 +11,7 @@ struct MinimalTheme: IslandTheme {
     let showsPersonaGlyph = true
 
     func makeScene() -> ThemeScene { MinimalScene() }
+    func icon() -> NSImage { IslandIcons.symbol("terminal", pointSize: 12) }
 
     func tint(for row: IslandPanel.Row) -> NSColor { stateTint(row) }
 }
