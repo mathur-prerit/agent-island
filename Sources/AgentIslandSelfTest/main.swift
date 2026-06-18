@@ -637,6 +637,351 @@ check(ColorRefSyntax.isValid("system:teal", palette: [:]) && ColorRefSyntax.isVa
       && !ColorRefSyntax.isValid("system:bogus", palette: [:]),
       "colour: system name validated against the shared resolver allowlist")
 
+// --- Theme catalog: strict decode of the hosted download index ---
+let validCatalog = """
+{
+  "themes": [
+    { "id": "critter", "displayName": "Pixel Critter", "version": "1.0.0",
+      "url": "https://example.com/critter.zip",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sizeBytes": 4096, "minAppVersion": "0.1.0" },
+    { "id": "neon", "displayName": "Neon", "version": "2.1.0",
+      "url": "https://example.com/neon.zip",
+      "sha256": "abc123", "sizeBytes": 8192, "minAppVersion": null }
+  ]
+}
+"""
+if case .success(let cat) = ThemeCatalog.decode(Data(validCatalog.utf8)) {
+    check(cat.themes.count == 2, "catalog: decodes both entries")
+    check(cat.themes[0].id == "critter" && cat.themes[0].displayName == "Pixel Critter"
+          && cat.themes[0].sizeBytes == 4096 && cat.themes[0].minAppVersion == "0.1.0",
+          "catalog: entry scalar fields decode")
+    check(cat.themes[1].minAppVersion == nil, "catalog: null minAppVersion decodes to nil")
+} else {
+    check(false, "catalog: a valid index must decode")
+}
+// Strict keys: an unknown field anywhere in the index rejects the whole catalog (no smuggling, same
+// posture as the manifest loader's strict top-level keys).
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data(#"{"themes":[{"id":"x","displayName":"X","version":"1","url":"u","sha256":"h","sizeBytes":1,"exec":"rm -rf"}]}"#.utf8)) { return true }; return false }(),
+      "catalog: unknown per-entry key (e.g. exec) rejected (strict, no smuggling)")
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data(#"{"bogus":[]}"#.utf8)) { return true }; return false }(),
+      "catalog: missing 'themes' key rejected")
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data("not json".utf8)) { return true }; return false }(),
+      "catalog: non-JSON index rejected")
+check({ if case .failure(.malformedIndex) = ThemeCatalog.decode(Data("[]".utf8)) { return true }; return false }(),
+      "catalog: bare array (wrong shape) rejected — index is an object")
+
+// --- Theme catalog: integrity verify (size + sha256), the pre-extraction download gate ---
+// Compute a real digest of a fixture blob so the MATCH case is genuine without any network.
+let blob = Data("agent-island theme payload".utf8)
+let digest = ThemeCatalogEntry.sha256Hex(blob)
+check(digest.count == 64 && digest == digest.lowercased(), "catalog: sha256Hex is 64-char lowercase hex")
+func entryFor(_ data: Data, sha: String) -> ThemeCatalogEntry {
+    ThemeCatalogEntry(id: "t", displayName: "T", version: "1", url: "u", sha256: sha,
+                      sizeBytes: data.count, minAppVersion: nil)
+}
+check(entryFor(blob, sha: digest).verify(blob) == nil, "catalog: matching size + sha256 verifies (nil)")
+// Upper-case sha in the index still matches (case-insensitive compare).
+check(entryFor(blob, sha: digest.uppercased()).verify(blob) == nil, "catalog: upper-case sha in index still matches")
+// Size mismatch: declared size != actual blob length.
+let sizeBadEntry = ThemeCatalogEntry(id: "t", displayName: "T", version: "1", url: "u",
+                                     sha256: digest, sizeBytes: blob.count + 1, minAppVersion: nil)
+check(sizeBadEntry.verify(blob) == .sizeMismatch(expected: blob.count + 1, actual: blob.count),
+      "catalog: size mismatch rejected before sha check")
+// Hash mismatch: right size, wrong (tampered) bytes — the digest differs.
+let tampered = Data("agent-island theme payloads".utf8)   // one extra byte changes the digest
+check(entryFor(tampered, sha: digest).verify(tampered) != nil, "catalog: tampered bytes fail sha (non-nil)")
+if case .hashMismatch(let expected, let actual)? = entryFor(tampered, sha: digest).verify(tampered) {
+    check(expected == digest && actual != digest && actual == ThemeCatalogEntry.sha256Hex(tampered),
+          "catalog: hash mismatch reports expected vs. actual digest")
+} else { check(false, "catalog: tampered bytes must report .hashMismatch") }
+// Size is checked first (cheap) — a wrong-size blob never reaches the sha compare.
+check(entryFor(blob, sha: "deadbeef").verify(Data()).map { if case .sizeMismatch = $0 { return true }; return false } == true,
+      "catalog: empty blob fails on size, not sha")
+
+// --- Theme catalog: entry id is a safe single path segment (HIGH-3 escape guard) ---
+// The id becomes the install folder name (`~/.agent-island/themes/<id>/`); a `..`/`a/b`/empty id would
+// escape that root (a later removeItem could delete the themes dir), so it's gated before any download.
+check(ThemeCatalogEntry.isSafeID("critter") && ThemeCatalogEntry.isSafeID("neon-2"),
+      "id-safe: a plain folder name is a safe id")
+check(!ThemeCatalogEntry.isSafeID(".."), "id-safe: '..' rejected (would escape install root)")
+check(!ThemeCatalogEntry.isSafeID("."), "id-safe: '.' rejected")
+check(!ThemeCatalogEntry.isSafeID(""), "id-safe: empty id rejected")
+check(!ThemeCatalogEntry.isSafeID("a/b"), "id-safe: 'a/b' (separator) rejected")
+check(!ThemeCatalogEntry.isSafeID("../evil"), "id-safe: '../evil' rejected")
+check(!ThemeCatalogEntry.isSafeID("a\\b"), "id-safe: backslash rejected")
+check(!ThemeCatalogEntry.isSafeID("a\u{0}b"), "id-safe: NUL rejected")
+check(ThemeCatalogEntry.isSafeID("a..b"), "id-safe: '..' as a substring of a single segment is fine")
+
+// --- ZipInspector: defensive central-directory parsing on CRAFTED hostile bytes (HIGH-1) ---
+// A from-scratch zip builder that emits ONLY a central directory + EOCD (the inspector reads no local
+// headers / file data), so a crafted entry's name, sizes, and unix mode are set verbatim — no real
+// archive, no disk, no network. external-attrs high 16 bits carry the unix st_mode (symlink detection).
+func le16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)] }
+func le32(_ v: UInt64) -> [UInt8] {
+    [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]
+}
+func le64(_ v: UInt64) -> [UInt8] { (0..<8).map { UInt8((v >> (8 * $0)) & 0xFF) } }
+struct CraftEntry { var name: String; var uncompressed: UInt64; var compressed: UInt64; var mode: UInt16 }
+// Build a central-directory header for one entry. `zip64` packs the sizes into the extra field and puts
+// the 0xFFFFFFFF sentinel in the 32-bit size slots (exercises the zip64 path).
+func centralHeader(_ e: CraftEntry, zip64: Bool) -> [UInt8] {
+    let nameBytes = Array(e.name.utf8)
+    var extra: [UInt8] = []
+    var compField = le32(e.compressed)
+    var uncompField = le32(e.uncompressed)
+    if zip64 {
+        compField = le32(0xFFFFFFFF); uncompField = le32(0xFFFFFFFF)
+        // zip64 extra: id 0x0001, data length 16, then uncompressed (8) + compressed (8) in that order.
+        extra = le16(0x0001) + le16(16) + le64(e.uncompressed) + le64(e.compressed)
+    }
+    var h: [UInt8] = []
+    h += le32(0x02014b50)            // central file header signature
+    h += le16(20)                    // version made by
+    h += le16(20)                    // version needed
+    h += le16(0)                     // flags
+    h += le16(0)                     // compression method (stored)
+    h += le16(0) + le16(0)           // mod time + date
+    h += le32(0)                     // crc32
+    h += compField                   // compressed size (or sentinel)
+    h += uncompField                 // uncompressed size (or sentinel)
+    h += le16(nameBytes.count)       // file name length
+    h += le16(extra.count)           // extra field length
+    h += le16(0)                     // file comment length
+    h += le16(0)                     // disk number start
+    h += le16(0)                     // internal attrs
+    h += le32(UInt64(e.mode) << 16)  // external attrs: unix mode in the high 16 bits
+    h += le32(0)                     // local header offset
+    h += nameBytes
+    h += extra
+    return h
+}
+// Assemble a whole archive: an optional leading "local data" filler (so the CD offset isn't 0), the
+// central directory, then the EOCD pointing at it.
+func craftZip(_ entries: [CraftEntry], zip64: Bool = false,
+              leadingBytes: Int = 8, comment: [UInt8] = []) -> Data {
+    let lead = [UInt8](repeating: 0, count: leadingBytes)
+    var cd: [UInt8] = []
+    for e in entries { cd += centralHeader(e, zip64: zip64) }
+    let cdOffset = lead.count
+    var eocd: [UInt8] = []
+    eocd += le32(0x06054b50)               // EOCD signature
+    eocd += le16(0) + le16(0)              // disk numbers
+    eocd += le16(entries.count)            // cd records on this disk
+    eocd += le16(entries.count)            // total cd records
+    eocd += le32(UInt64(cd.count))         // cd size
+    eocd += le32(UInt64(cdOffset))         // cd offset
+    eocd += le16(comment.count)            // comment length
+    eocd += comment
+    return Data(lead + cd + eocd)
+}
+// A regular-file unix mode (S_IFREG | 0644) and a symlink mode (S_IFLNK | 0777).
+let regMode: UInt16 = 0o100644
+let lnkMode: UInt16 = 0o120777
+
+// Valid central directory parses: two benign files, sizes + names + (no) symlink read back correctly.
+let validZip = craftZip([
+    CraftEntry(name: "theme.json", uncompressed: 200, compressed: 120, mode: regMode),
+    CraftEntry(name: "images/x.png", uncompressed: 4096, compressed: 2048, mode: regMode),
+])
+switch ZipInspector.inspect(validZip) {
+case .success(let entries):
+    check(entries.count == 2 && entries[0].name == "theme.json" && entries[0].uncompressedSize == 200
+          && entries[1].name == "images/x.png" && entries[1].compressedSize == 2048
+          && !entries[0].isSymlink,
+          "zipinspect: valid central directory parses (names, sizes, not-symlink)")
+case .failure(let e):
+    check(false, "zipinspect: valid central directory must parse [got \(e)]")
+}
+// checkArchive on the valid zip with sane sizes passes (within all PackLimits).
+check(ZipInspector.checkArchive(validZip, archiveBytes: validZip.count) == nil,
+      "zipinspect: a benign small archive passes all limits")
+
+// A `../` name is rejected as an unsafe (zip-slip) name, pre-extraction.
+let traversalZip = craftZip([CraftEntry(name: "../escape.png", uncompressed: 10, compressed: 10, mode: regMode)])
+check(ZipInspector.checkArchive(traversalZip, archiveBytes: traversalZip.count) == .unsafeName("../escape.png"),
+      "zipinspect: a '../' entry name rejected (zip-slip)")
+// An absolute name is rejected as unsafe.
+let absoluteZip = craftZip([CraftEntry(name: "/etc/passwd", uncompressed: 10, compressed: 10, mode: regMode)])
+check(ZipInspector.checkArchive(absoluteZip, archiveBytes: absoluteZip.count) == .unsafeName("/etc/passwd"),
+      "zipinspect: an absolute entry name rejected")
+// A symlink-mode entry is rejected as a symlink (S_IFLNK in the external-attrs unix mode).
+let symlinkZip = craftZip([CraftEntry(name: "link", uncompressed: 8, compressed: 8, mode: lnkMode)])
+check(ZipInspector.checkArchive(symlinkZip, archiveBytes: symlinkZip.count) == .symlink("link"),
+      "zipinspect: a symlink-mode entry rejected (S_IFLNK)")
+// A single file over the 5 MB per-file limit is rejected as .fileTooLarge.
+let bigFileZip = craftZip([CraftEntry(name: "big.bin", uncompressed: 6 * 1024 * 1024, compressed: 1000, mode: regMode)])
+check(ZipInspector.checkArchive(bigFileZip, archiveBytes: bigFileZip.count) == .limit(.fileTooLarge),
+      "zipinspect: a single declared file over the 5 MB per-file cap rejected (.fileTooLarge)")
+// 12 files each under the per-file cap but summing past the 50 MB TOTAL cap → .uncompressedTooLarge.
+let bombTotal = craftZip((0..<12).map { CraftEntry(name: "f\($0).bin", uncompressed: 4_500_000, compressed: 1000, mode: regMode) })
+check(ZipInspector.checkArchive(bombTotal, archiveBytes: 200_000) == .limit(.uncompressedTooLarge),
+      "zipinspect: declared TOTAL uncompressed over the 50 MB cap rejected (each file under per-file cap)")
+// A small archive that claims a ~100x+ inflate within the per-file/total caps still trips the RATIO.
+let ratioZip = craftZip([CraftEntry(name: "a.bin", uncompressed: 4 * 1024 * 1024, compressed: 10, mode: regMode)])
+check(ZipInspector.checkArchive(ratioZip, archiveBytes: 1000) == .limit(.compressionBomb),
+      "zipinspect: compression ratio over limit rejected (declared, pre-extraction)")
+// Truncated/garbage bytes never crash — they return a typed error (no EOCD found).
+check({ if case .failure(.notAZip) = ZipInspector.inspect(Data("not a zip at all, just text".utf8)) { return true }; return false }(),
+      "zipinspect: garbage bytes rejected without crash (.notAZip)")
+check({ if case .failure(.notAZip) = ZipInspector.inspect(Data()) { return true }; return false }(),
+      "zipinspect: empty input rejected without crash")
+// A truncated central directory (EOCD claims a CD that runs past the bytes) is malformed, not a crash.
+var truncated = [UInt8](craftZip([CraftEntry(name: "x", uncompressed: 1, compressed: 1, mode: regMode)]))
+truncated.removeLast(30)   // lop off the EOCD + tail
+check({ if case .failure = ZipInspector.inspect(Data(truncated)) { return true }; return false }(),
+      "zipinspect: truncated archive rejected without crash")
+// A trailing zip comment is handled (EOCD found by scanning back past the comment).
+let commentedZip = craftZip([CraftEntry(name: "theme.json", uncompressed: 50, compressed: 50, mode: regMode)],
+                            comment: Array("a friendly zip comment".utf8))
+check({ if case .success(let es) = ZipInspector.inspect(commentedZip), es.count == 1 { return true }; return false }(),
+      "zipinspect: a trailing zip comment is handled (EOCD located past it)")
+// zip64: sizes live in the extra field (32-bit slots are the 0xFFFFFFFF sentinel) — read them back.
+let zip64Zip = craftZip([CraftEntry(name: "huge.bin", uncompressed: 0xFFFF_FFFF + 100, compressed: 0xFFFF_FFFF + 1, mode: regMode)],
+                        zip64: true)
+switch ZipInspector.inspect(zip64Zip) {
+case .success(let es):
+    check(es.count == 1 && es[0].uncompressedSize == Int(0xFFFF_FFFF + 100),
+          "zipinspect: zip64 sizes resolved from the extra field")
+case .failure(let e):
+    check(false, "zipinspect: zip64 archive must parse [got \(e)]")
+}
+// An EOCD claiming the MAX 16-bit entry count (65535) but with NO backing central directory must be
+// rejected as malformed on the first header parse — it must NOT loop 65535 times or crash. (The
+// .tooManyEntries ceiling guards the zip64 path where the count can exceed 100k; a 16-bit EOCD caps at
+// 65535, below the ceiling, so this exercises the bounded-loop / forward-progress guard instead.)
+var dosEOCD: [UInt8] = []
+dosEOCD += le32(0x06054b50) + le16(0) + le16(0) + le16(0xFFFF) + le16(0xFFFF) + le32(0) + le32(0) + le16(0)
+check({ if case .failure(.malformed) = ZipInspector.inspect(Data(dosEOCD)) { return true }; return false }(),
+      "zipinspect: EOCD claiming 65535 entries with no backing CD -> .malformed (bounded, no crash/spin)")
+
+// --- ThemeInstaller: OFFLINE install pipeline driven from a LOCAL fixture zip (no network) ---
+// Build a REAL zip with /usr/bin/ditto at test time (the same engine the installer extracts with), run
+// the install-from-local-zip path, and assert it lands a valid theme dir. THIS is the regression proof
+// that the feature actually works end-to-end (HIGH-2) — not just compiles.
+var fixtureWorkDirs: [URL] = []   // collected so the test cleans every fixture scratch dir at the end
+func makeFixtureZip(themeID: String, manifestJSON: String, extraFiles: [(String, Data)] = [],
+                    symlink: (name: String, target: String)? = nil) -> URL? {
+    let fm = FileManager.default
+    let work = fm.temporaryDirectory.appendingPathComponent("ai-fixture-\(UUID().uuidString)", isDirectory: true)
+    fixtureWorkDirs.append(work)
+    let src = work.appendingPathComponent(themeID, isDirectory: true)   // wrap in one folder (the common case)
+    try? fm.createDirectory(at: src.appendingPathComponent("images"), withIntermediateDirectories: true)
+    try? Data(manifestJSON.utf8).write(to: src.appendingPathComponent("theme.json"))
+    for (rel, data) in extraFiles { try? data.write(to: src.appendingPathComponent(rel)) }
+    if let link = symlink {
+        try? fm.createSymbolicLink(atPath: src.appendingPathComponent(link.name).path, withDestinationPath: link.target)
+    }
+    let zipURL = work.appendingPathComponent("\(themeID).zip")
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+    proc.arguments = ["-c", "-k", "--sequesterRsrc", src.path, zipURL.path]   // -c create, -k PKZip
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do { try proc.run() } catch { return nil }
+    proc.waitUntilExit()
+    return proc.terminationStatus == 0 ? zipURL : nil
+}
+func fixtureEntry(id: String, zipURL: URL) -> ThemeCatalogEntry {
+    let data = (try? Data(contentsOf: zipURL)) ?? Data()
+    return ThemeCatalogEntry(id: id, displayName: "Fixture \(id)", version: "1.0.0",
+                             url: "https://example.com/\(id).zip",
+                             sha256: ThemeCatalogEntry.sha256Hex(data), sizeBytes: data.count, minAppVersion: nil)
+}
+// A minimal VALID manifest (id must equal the install folder name).
+func fixtureManifest(id: String) -> String {
+    """
+    {"schemaVersion":1,"id":"\(id)","displayName":"Fixture","states":{"idle":{"visual":{"kind":"image","file":"images/x.png"}}}}
+    """
+}
+let installFM = FileManager.default
+// A throwaway install root + scratch dir (NOT the user's real ~/.agent-island).
+let benignRoot = installFM.temporaryDirectory.appendingPathComponent("ai-install-root-\(UUID().uuidString)", isDirectory: true)
+let benignScratch = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+try? installFM.createDirectory(at: benignScratch, withIntermediateDirectories: true)
+fixtureWorkDirs.append(benignRoot); fixtureWorkDirs.append(benignScratch)   // cleaned at the end (exit() skips defer)
+
+if let zipURL = makeFixtureZip(themeID: "fixtheme", manifestJSON: fixtureManifest(id: "fixtheme"),
+                               extraFiles: [("images/x.png", Data([0x89, 0x50, 0x4E, 0x47]))]) {
+    let entry = fixtureEntry(id: "fixtheme", zipURL: zipURL)
+    let result = ThemeInstaller.installFromLocalZip(zipURL, entry: entry, appVersion: "0.3.0",
+                                                    installRoot: benignRoot, scratch: benignScratch)
+    switch result {
+    case .success(let id):
+        let landed = benignRoot.appendingPathComponent("fixtheme").appendingPathComponent("theme.json")
+        check(id == "fixtheme" && installFM.fileExists(atPath: landed.path),
+              "installer: a benign theme installs end-to-end (HIGH-2 regression — feature actually works)")
+    case .failure(let e):
+        check(false, "installer: benign theme must install [got \(e)]")
+    }
+} else {
+    check(false, "installer: ditto fixture zip must build (test environment needs /usr/bin/ditto)")
+}
+
+// Benign install with a TAMPERED catalog entry (wrong sha) is rejected at the integrity gate.
+if let zipURL2 = makeFixtureZip(themeID: "tamper", manifestJSON: fixtureManifest(id: "tamper")) {
+    var bad = fixtureEntry(id: "tamper", zipURL: zipURL2)
+    bad = ThemeCatalogEntry(id: "tamper", displayName: bad.displayName, version: bad.version, url: bad.url,
+                            sha256: String(repeating: "0", count: 64), sizeBytes: bad.sizeBytes, minAppVersion: nil)
+    let scratch2 = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+    try? installFM.createDirectory(at: scratch2, withIntermediateDirectories: true)
+    fixtureWorkDirs.append(scratch2)
+    let r = ThemeInstaller.installFromLocalZip(zipURL2, entry: bad, appVersion: "0.3.0",
+                                               installRoot: benignRoot, scratch: scratch2)
+    check({ if case .failure(.integrity) = r { return true }; return false }(),
+          "installer: a sha mismatch is rejected at the integrity gate (before extraction)")
+}
+
+// id-escape rejected before ANY filesystem mutation: an id of `..` / `a/b` / empty never moves a file.
+let escScratch = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+try? installFM.createDirectory(at: escScratch, withIntermediateDirectories: true)
+fixtureWorkDirs.append(escScratch)
+let dummyZip = escScratch.appendingPathComponent("dummy.zip")
+try? Data([0x00]).write(to: dummyZip)   // never read — id gate fails first
+for badID in ["..", "a/b", ""] {
+    let e = ThemeCatalogEntry(id: badID, displayName: "x", version: "1", url: "https://e/x.zip",
+                              sha256: "x", sizeBytes: 1, minAppVersion: nil)
+    let r = ThemeInstaller.installFromLocalZip(dummyZip, entry: e, appVersion: "0.3.0",
+                                               installRoot: benignRoot, scratch: escScratch)
+    check({ if case .failure(.unsafeID) = r { return true }; return false }(),
+          "installer: id '\(badID)' rejected before any filesystem mutation")
+}
+// isDirectChild guards the move target: a direct child passes, a `..` escape does not.
+check(ThemeInstaller.isDirectChild(benignRoot.appendingPathComponent("ok"), of: benignRoot),
+      "installer: a direct child of the install root is allowed as a move target")
+check(!ThemeInstaller.isDirectChild(benignRoot.appendingPathComponent("a/b"), of: benignRoot),
+      "installer: a nested path is NOT a direct child (move refused)")
+
+// A theme zip containing a SYMLINK is rejected (pre-extraction by the inspector if mode-marked, AND
+// post-extraction by the lstat walk — here ditto writes a real symlink, exercising the post path).
+if let symZip = makeFixtureZip(themeID: "evil", manifestJSON: fixtureManifest(id: "evil"),
+                               extraFiles: [("images/x.png", Data([0x89]))],
+                               symlink: (name: "link", target: "/etc/passwd")) {
+    let e = fixtureEntry(id: "evil", zipURL: symZip)
+    let scratch3 = installFM.temporaryDirectory.appendingPathComponent("ai-scratch-\(UUID().uuidString)", isDirectory: true)
+    try? installFM.createDirectory(at: scratch3, withIntermediateDirectories: true)
+    fixtureWorkDirs.append(scratch3)
+    let r = ThemeInstaller.installFromLocalZip(symZip, entry: e, appVersion: "0.3.0",
+                                               installRoot: benignRoot, scratch: scratch3)
+    check({ if case .failure(.symlinkInArchive) = r { return true }
+            if case .failure(.zip(.symlink)) = r { return true }   // pre-extraction reject is also acceptable
+            return false }(),
+          "installer: a theme zip containing a symlink is rejected (symlink defense, both layers)")
+}
+
+// --- Theme URL scheme: only https accepted (MED-4), no network needed. (The App's ThemeDownloader
+// gates both the index URL and entry.url through this same pure check before any fetch.) ---
+check(ThemeCatalogEntry.isHTTPSURL("https://example.com/x.zip"), "url-scheme: https URL accepted")
+check(ThemeCatalogEntry.isHTTPSURL("HTTPS://EXAMPLE.com/x.zip"), "url-scheme: scheme compare is case-insensitive")
+check(!ThemeCatalogEntry.isHTTPSURL("http://example.com/x.zip"), "url-scheme: http (plaintext) rejected")
+check(!ThemeCatalogEntry.isHTTPSURL("file:///etc/passwd"), "url-scheme: file:// rejected")
+check(!ThemeCatalogEntry.isHTTPSURL("ftp://example.com/x.zip"), "url-scheme: ftp:// rejected")
+check(!ThemeCatalogEntry.isHTTPSURL("not a url at all"), "url-scheme: scheme-less string rejected")
+
+// Tidy up every fixture / install-root / scratch dir built above. (Top-level `defer` would be skipped
+// by the `exit()` below, so cleanup is explicit — matching the SettingsFile temp-dir teardown earlier.)
+for dir in fixtureWorkDirs { try? FileManager.default.removeItem(at: dir) }
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")

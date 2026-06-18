@@ -4,6 +4,7 @@ import QuartzCore
 import AgentIslandCore
 import PersonaKit
 import AgentIslandDaemon
+import AgentIslandThemes
 
 // agent-island v0 app: a menu-bar (accessory) item plus an always-on-top floating
 // "island" panel. Both list active Claude Code sessions and their derived state, polled
@@ -31,6 +32,13 @@ final class AppController: NSObject {
     // at SessionStart by the hook and carried in the daemon snapshot. Empty in polling mode.
     private struct WindowIdentity { let termProgram: String?; let itermSessionID: String?; let bundleID: String? }
     private var windowIdentities: [String: WindowIdentity] = [:]
+
+    // Downloadable themes: the hosted catalog, fetched once lazily in the background (network) and
+    // cached so the menu builds synchronously. nil = not fetched yet / fetch failed (offline → the
+    // submenu just shows no download entries; never an error dialog). A download in flight blocks a
+    // second start of the SAME id so a double-click can't race two installs.
+    private var themeCatalog: ThemeCatalog?
+    private var downloadingThemeIDs: Set<String> = []
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -64,6 +72,20 @@ final class AppController: NSObject {
         RunLoop.main.add(t, forMode: .common)
         timer = t
         maybeOfferEventDrivenSetup()
+        fetchThemeCatalog()
+    }
+
+    /// Fetch the hosted theme catalog once in the background; cache it and rebuild the menu so the
+    /// download entries appear. Best-effort — offline / a failed fetch simply leaves the submenu with
+    /// no download entries (no dialog, no crash). Never blocks the main thread on the network.
+    private func fetchThemeCatalog() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard case .success(let catalog) = ThemeDownloader.fetchCatalog() else { return }
+            DispatchQueue.main.async {
+                self?.themeCatalog = catalog
+                self?.refresh()
+            }
+        }
     }
 
     private func refresh() {
@@ -98,10 +120,32 @@ final class AppController: NSObject {
         let themeItem = NSMenuItem(title: "Animation theme", action: nil, keyEquivalent: "")
         let themeMenu = NSMenu()
         let currentTheme = UserDefaults.standard.string(forKey: "islandTheme") ?? Themes.all[0].id
+        let installedIDs = Set(Themes.all.map(\.id))
         for t in Themes.all {
             let ti = NSMenuItem(title: t.displayName, action: #selector(pickTheme(_:)), keyEquivalent: "")
             ti.target = self; ti.representedObject = t.id; ti.state = (t.id == currentTheme) ? .on : .off
             themeMenu.addItem(ti)
+        }
+        // Downloadable themes from the hosted catalog: only those NOT already installed. An entry the
+        // running app is too old for is shown disabled (greyed); everything else triggers a download
+        // on click. Offline / no catalog → this whole section is simply absent.
+        let downloadable = (themeCatalog?.themes ?? []).filter { !installedIDs.contains($0.id) }
+        if !downloadable.isEmpty {
+            themeMenu.addItem(.separator())
+            themeMenu.addItem(infoItem("Download more"))
+            for entry in downloadable {
+                let supported = SemVer.isAtLeast(AppInfo.version, entry.minAppVersion)
+                let downloading = downloadingThemeIDs.contains(entry.id)
+                let suffix = downloading ? " (downloading…)" : (supported ? "" : " (needs app \(entry.minAppVersion ?? "?"))")
+                // displayName is untrusted catalog text → strip control/ANSI + clamp before it goes in a
+                // menu title (reuses the agent-output sanitizer; 48 chars is generous for a theme label).
+                let label = TaskLineSanitizer.sanitize(entry.displayName, maxLength: 48)
+                let di = NSMenuItem(title: "\(label)\(suffix)",
+                                    action: #selector(downloadTheme(_:)), keyEquivalent: "")
+                di.target = self; di.representedObject = entry.id
+                di.isEnabled = supported && !downloading   // grey out unsupported / in-flight entries
+                themeMenu.addItem(di)
+            }
         }
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
@@ -267,6 +311,32 @@ final class AppController: NSObject {
         UserDefaults.standard.set(id, forKey: "islandTheme")
         island.setTheme(id)
         refresh()
+    }
+
+    /// Download + install a catalog theme by id. Runs the whole validate-then-install pipeline off the
+    /// main thread; on success re-discovers themes (`Themes.reload()`) so the new theme appears in the
+    /// submenu and renders. On failure it logs and no-ops — a bad download must never crash the app or
+    /// leave a partial install (the downloader guarantees the latter). Re-entrancy-guarded per id.
+    @objc private func downloadTheme(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let entry = themeCatalog?.themes.first(where: { $0.id == id }),
+              !downloadingThemeIDs.contains(id) else { return }
+        downloadingThemeIDs.insert(id)
+        refresh()   // reflect "(downloading…)" + disable the entry
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = ThemeDownloader.install(entry)
+            DispatchQueue.main.async {
+                self?.downloadingThemeIDs.remove(id)
+                switch result {
+                case .success(let installedID):
+                    Themes.reload()   // re-scan ~/.agent-island/themes → the new theme is now discoverable
+                    FileHandle.standardError.write(Data("agent-island: installed theme '\(installedID)'\n".utf8))
+                case .failure(let error):
+                    FileHandle.standardError.write(Data("agent-island: theme download '\(id)' failed: \(error)\n".utf8))
+                }
+                self?.refresh()   // rebuild the menu either way (drop the spinner, show the new theme)
+            }
+        }
     }
 
     @objc private func toggleSound() {
