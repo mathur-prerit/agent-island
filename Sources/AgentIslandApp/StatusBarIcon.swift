@@ -13,12 +13,17 @@ import Foundation
 // per backing scale factor (crisp on Retina). `isTemplate = false` because the lamp carries a real colour.
 extension IslandIcons {
     /// `beamPhase` (0…1) animates the sweeping beam; `nil` draws a static beam (Reduce Motion / when the
-    /// beam is off the parameter is ignored). `beam` gates whether any beam is drawn at all.
-    static func lighthouse(lamp: NSColor, beam: Bool, beamPhase: CGFloat? = nil, showUpdateDot: Bool = false) -> NSImage {
+    /// beam is off the parameter is ignored). `beam` gates whether any beam is drawn at all. `compact`
+    /// renders a centered, narrow lighthouse with no beam — for inline use (e.g. the island panel header).
+    static func lighthouse(lamp: NSColor, beam: Bool, beamPhase: CGFloat? = nil,
+                           showUpdateDot: Bool = false, compact: Bool = false) -> NSImage {
         let structure = NSColor.labelColor
-        let img = NSImage(size: NSSize(width: 24, height: 18), flipped: false) { rect in
+        let size = compact ? NSSize(width: 15, height: 18) : NSSize(width: 24, height: 18)
+        let img = NSImage(size: size, flipped: false) { rect in
             let u = rect.height                 // size the lighthouse by HEIGHT so the wide canvas doesn't fatten it
-            let cx = rect.minX + u * 0.5        // lighthouse in the left third; the right is open sky for the beam
+            // Compact → centered (tight inline logo); full → left third with open sky on the right for the beam.
+            let cx = compact ? rect.midX : rect.minX + u * 0.5
+            let drawBeam = beam && !compact
             structure.setFill(); structure.setStroke()
 
             // Island base.
@@ -38,7 +43,7 @@ extension IslandIcons {
 
             let lampC = NSPoint(x: cx, y: tt + u*0.06)
             // Beam — sweeps across the right sky (low-right → near-vertical) when animated; static up-right otherwise.
-            if beam {
+            if drawBeam {
                 let theta: CGFloat = (beamPhase.map { 0.78 + 0.68 * sin(2 * .pi * $0) }) ?? 0.62
                 let len = u * 0.85, half: CGFloat = 0.28
                 let p1 = NSPoint(x: lampC.x + len*cos(theta-half), y: lampC.y + len*sin(theta-half))
