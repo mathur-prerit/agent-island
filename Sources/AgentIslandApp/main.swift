@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import QuartzCore
+import ServiceManagement
 import AgentIslandCore
 import PersonaKit
 import AgentIslandDaemon
@@ -12,7 +13,7 @@ import AgentIslandThemes
 // state.json when it's running). Each session wears a persona (PersonaKit). Plain
 // SwiftPM executable: `swift run AgentIslandApp`.
 
-final class AppController: NSObject {
+final class AppController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let island = IslandPanel()
@@ -27,6 +28,20 @@ final class AppController: NSObject {
     // closed on battery — clamshell sleep is a separate mechanism.)
     private var sleepToken: NSObjectProtocol?
     private let keepAwakeKey = "islandKeepAwake"   // UserDefaults bool; default off
+
+    // Cached login-item state. SMAppService.status is a synchronous launchd/XPC query; reading it on
+    // every 3s refresh() would hitch the main thread. We cache it and re-query only at start, after the
+    // user toggles it, and when the menu is about to open (menuWillOpen) — where freshness actually matters.
+    private var loginItemEnabled = false
+
+    // Sweeping-beam animation for the menu-bar lighthouse. A ~12fps ticker runs ONLY while a session is
+    // working/waiting (and Reduce Motion is off); idle/finished show clear sky and cost nothing. The
+    // status draw inputs are cached so the ticker can redraw frames without re-deriving session state.
+    private var beamTimer: Timer?
+    private var beamFrame = 0
+    private var statusLamp: NSColor = .secondaryLabelColor
+    private var statusBeamActive = false
+    private var statusShowDot = false
 
     // Click-to-focus: the owning terminal's window identity per session (keyed by fullID), captured
     // at SessionStart by the hook and carried in the daemon snapshot. Empty in polling mode.
@@ -71,9 +86,13 @@ final class AppController: NSObject {
     private let openCodeProvider = OpenCodeProvider()
 
     func start() {
-        statusItem.button?.title = "○"
+        // Seed the lighthouse glyph (a mini of the app logo) before the first refresh() (re-tinted below).
+        statusItem.button?.image = IslandIcons.lighthouse(lamp: .secondaryLabelColor, beam: false)
+        statusItem.button?.imagePosition = .imageLeading
         menu.autoenablesItems = false
         statusItem.menu = menu
+        menu.delegate = self                                       // re-query login status on open (see menuWillOpen)
+        loginItemEnabled = (SMAppService.mainApp.status == .enabled)
         dismissedFinished = Set(UserDefaults.standard.stringArray(forKey: dismissedKey) ?? [])
         island.onDismiss = { [weak self] id in self?.dismissFinished(id) }
         island.onFocus = { [weak self] id in self?.focusWindow(id) }
@@ -133,7 +152,20 @@ final class AppController: NSObject {
             menu.addItem(infoItem("No active sessions (last 30 min)"))
         } else {
             menu.addItem(infoItem("Active sessions"))
-            for s in sessions { menu.addItem(infoItem(rowText(for: s))) }
+            for s in sessions {
+                // Clickable when we know the owning terminal (daemon mode / state.json captures the window
+                // identity) — clicking focuses its tab/window, the same as clicking the island row. In
+                // polling-only mode there's no identity to focus, so the row stays plain info text.
+                if windowIdentities[s.fullID] != nil {
+                    let row = NSMenuItem(title: rowText(for: s),
+                                         action: #selector(focusSessionFromMenu(_:)), keyEquivalent: "")
+                    row.target = self; row.isEnabled = true; row.representedObject = s.fullID
+                    row.toolTip = "Click to focus this session's terminal"
+                    menu.addItem(row)
+                } else {
+                    menu.addItem(infoItem(rowText(for: s)))
+                }
+            }
         }
         menu.addItem(.separator())
         // "Update available" indicator: only present when the daily check found a strictly-newer,
@@ -222,6 +254,13 @@ final class AppController: NSObject {
         keepAwakeToggle.state = UserDefaults.standard.bool(forKey: keepAwakeKey) ? .on : .off
         menu.addItem(keepAwakeToggle)
 
+        // Start-on-boot, controllable right here in the menu (no need for the CLI). Registering the main
+        // app as a login item from INSIDE the running .app is the reliable SMAppService path.
+        let loginToggle = NSMenuItem(title: "Launch at login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        loginToggle.target = self; loginToggle.isEnabled = true
+        loginToggle.state = loginItemEnabled ? .on : .off   // cached; refreshed on toggle + menuWillOpen
+        menu.addItem(loginToggle)
+
         menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
         clear.target = self
@@ -237,21 +276,36 @@ final class AppController: NSObject {
         menu.addItem(quit)
 
         let waiting = sessions.filter { isWaiting($0.status) }.count
-        let working = sessions.contains { $0.status == .working }
+        let workingCount = sessions.filter { $0.status == .working }.count
+        let working = workingCount > 0
         updateSleepAssertion(on: UserDefaults.standard.bool(forKey: keepAwakeKey), working: working)
-        let glyph: String
-        let glyphColor: NSColor
-        // A subtle update cue rides only on the idle glyph (○⋯) — the urgent waiting/working states keep
-        // their uncluttered count, so the update hint never competes with "an agent needs you". The menu
-        // item is the real affordance; this is just a quiet "there's something in the menu".
+        // The menu-bar lighthouse's lamp is tinted by the most urgent state, mirroring the island's
+        // palette: red waiting · teal working · green finished · gray idle. The dominant state's COUNT
+        // rides as trailing text — how many agents are WAITING on you, else how many are RUNNING. A quiet
+        // corner dot rides the IDLE icon as the "update available" cue so it never competes with "an agent
+        // needs you". The menu item is the real update affordance; the dot is just "there's something".
         let updateCue = updateAvailable.offeredVersion != nil
-        if waiting > 0 { glyph = "● \(waiting)"; glyphColor = .systemRed }
-        else if working { glyph = "◐"; glyphColor = .systemTeal }
-        else { glyph = updateCue ? "○⋯" : "○"; glyphColor = .secondaryLabelColor }
+        let finishedPresent = sessions.contains { isFinished($0.status) }
+        let tintColor: NSColor
+        let countText: String
+        if waiting > 0 { tintColor = .systemRed; countText = "\(waiting)" }
+        else if working { tintColor = .systemTeal; countText = "\(workingCount)" }
+        else if finishedPresent { tintColor = .systemGreen; countText = "" }
+        else { tintColor = .secondaryLabelColor; countText = "" }
+        // The lamp/beam carry the state colour on a neutral (labelColor) lighthouse; the beam lights and
+        // SWEEPS only while actively working or waiting (idle/finished are calm). Cache the inputs, draw a
+        // frame now, then start/stop the sweep ticker.
+        statusLamp = tintColor
+        statusBeamActive = working || waiting > 0
+        statusShowDot = updateCue && waiting == 0 && !working && !finishedPresent
+        applyStatusImage()
+        updateBeamTimer()
         if let button = statusItem.button {
+            // The waiting count rides as text beside the icon (variableLength sizes the item to fit);
+            // a leading space gives a small gap. Empty otherwise so the item stays icon-only.
             button.attributedTitle = NSAttributedString(
-                string: glyph,
-                attributes: [.foregroundColor: glyphColor, .font: NSFont.systemFont(ofSize: 13)])
+                string: countText.isEmpty ? "" : " \(countText)",
+                attributes: [.foregroundColor: tintColor, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
             button.wantsLayer = true
             if waiting > 0 && !IslandAnimations.reduceMotion {
                 if button.layer?.animation(forKey: "menu-pulse") == nil {
@@ -349,6 +403,7 @@ final class AppController: NSObject {
 
     @objc private func quit() {
         if let token = sleepToken { ProcessInfo.processInfo.endActivity(token); sleepToken = nil }
+        beamTimer?.invalidate(); beamTimer = nil
         NSApplication.shared.terminate(nil)
     }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
@@ -462,6 +517,74 @@ final class AppController: NSObject {
     @objc private func toggleKeepAwake() {
         UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: keepAwakeKey), forKey: keepAwakeKey)
         refresh()
+    }
+
+    /// Toggle the app as a login item (start on boot) via SMAppService. Registering the MAIN APP from
+    /// inside the running .app is the reliable path (unlike the bundle-less CLI). If macOS reports the
+    /// item requires approval (or register/unregister throws), open the Login Items settings pane so the
+    /// user can flip it manually rather than being left wondering whether it took.
+    @objc private func toggleLoginItem() {
+        let svc = SMAppService.mainApp
+        do {
+            if svc.status == .enabled { try svc.unregister() } else { try svc.register() }
+            if svc.status == .requiresApproval { openLoginItemsSettings() }
+        } catch {
+            openLoginItemsSettings()
+        }
+        loginItemEnabled = (svc.status == .enabled)   // refresh the cache after toggling
+        refresh()
+    }
+
+    private func openLoginItemsSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Draw the current menu-bar lighthouse frame. While working/waiting (and motion is allowed) the beam
+    /// sweeps via `beamFrame`; otherwise it's a static frame (Reduce Motion → no sweep).
+    private func applyStatusImage() {
+        guard let button = statusItem.button else { return }
+        let animating = statusBeamActive && !IslandAnimations.reduceMotion
+        let phase: CGFloat? = animating ? CGFloat(beamFrame % 36) / 36.0 : nil
+        button.image = IslandIcons.lighthouse(lamp: statusLamp, beam: statusBeamActive,
+                                              beamPhase: phase, showUpdateDot: statusShowDot)
+        button.imagePosition = .imageLeading
+    }
+
+    /// Run a ~12fps ticker ONLY while the beam should sweep (a session working/waiting, motion allowed);
+    /// stop it otherwise so an idle menu bar costs nothing. Registered in `.common` so it keeps sweeping
+    /// even while the menu is open.
+    private func updateBeamTimer() {
+        let animating = statusBeamActive && !IslandAnimations.reduceMotion
+        if animating {
+            if beamTimer == nil {
+                let t = Timer(timeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.beamFrame &+= 1
+                    self.applyStatusImage()
+                }
+                RunLoop.main.add(t, forMode: .common)
+                beamTimer = t
+            }
+        } else if beamTimer != nil {
+            beamTimer?.invalidate(); beamTimer = nil; beamFrame = 0
+        }
+    }
+
+    /// Re-query the login-item status only when the menu is about to open (keeps the synchronous
+    /// SMAppService call out of the 3s refresh loop). Rebuild if it changed since we last cached it, so
+    /// the checkmark reflects a change made elsewhere (e.g. System Settings ▸ Login Items).
+    func menuWillOpen(_ menu: NSMenu) {
+        let now = (SMAppService.mainApp.status == .enabled)
+        if now != loginItemEnabled { loginItemEnabled = now; refresh() }
+    }
+
+    /// Focus the terminal owning the session clicked in the menu (reuses the island's click-to-focus:
+    /// iTerm selects the exact tab/session by GUID; other terminals are raised by bundle id).
+    @objc private func focusSessionFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        focusWindow(id)
     }
 
     /// Hold an idle-system-sleep assertion only while the toggle is ON and a session is working;

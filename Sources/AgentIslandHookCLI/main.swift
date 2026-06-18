@@ -11,8 +11,12 @@ import AgentIslandDaemon
 //   agentisland-hook uninstall    # remove them
 //   agentisland-hook relay        # (used by the hooks) stdin JSON -> daemon socket
 
-let socketPath = ("~/.agent-island/agentisland.sock" as NSString).expandingTildeInPath
-let settingsPath = ("~/.claude/settings.json" as NSString).expandingTildeInPath
+// Resolve home via the shared HomeDir (honors $HOME, validated) so this bridge, the app's
+// EventDrivenSetup, and the `agentisland` management CLI all target the SAME ~/.claude / ~/.agent-island.
+// (Previously this used expandingTildeInPath = NSHomeDirectory(), which ignores a $HOME override.)
+let home = HomeDir.path
+let socketPath = home + "/.agent-island/agentisland.sock"
+let settingsPath = home + "/.claude/settings.json"
 let events = ["UserPromptSubmit", "Stop", "PostToolUse", "SubagentStart", "SubagentStop",
               "PermissionRequest", "SessionStart", "SessionEnd"]
 

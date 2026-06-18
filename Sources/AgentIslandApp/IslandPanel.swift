@@ -99,6 +99,9 @@ final class IslandPanel: NSPanel {
         container.wantsLayer = true
         container.layer?.cornerRadius = 16
         container.layer?.masksToBounds = true
+        // A hairline edge crisps the translucent card against any wallpaper behind it.
+        container.layer?.borderWidth = 0.5
+        container.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
 
         headerButton.isBordered = false
         headerButton.bezelStyle = .inline
@@ -200,6 +203,9 @@ final class IslandPanel: NSPanel {
             rowsStack.insertArrangedSubview(v, at: min(i, rowsStack.arrangedSubviews.count))
         }
 
+        headerButton.image = IslandIcons.lighthouse(lamp: headerLamp(), beam: false, compact: true)
+        headerButton.imagePosition = .imageLeading
+        headerButton.imageHugsTitle = true
         headerButton.attributedTitle = headerTitle()
         scrollView.isHidden = !expanded
         resizeAndReposition()
@@ -227,11 +233,31 @@ final class IslandPanel: NSPanel {
 
     private func headerTitle() -> NSAttributedString {
         let chevron = expanded ? "▾" : "▸"
-        let text = expanded ? "agent-island  \(chevron)" : "\(collapsedSummary())  \(chevron)"
-        return NSAttributedString(string: text, attributes: [
+        let chevronAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ])
+            .foregroundColor: NSColor.tertiaryLabelColor]
+        if expanded {
+            // Expanded: the "agent-island" wordmark beside the logo, in full label colour.
+            let s = NSMutableAttributedString(string: "agent-island", attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: NSColor.labelColor])
+            s.append(NSAttributedString(string: "  \(chevron)", attributes: chevronAttrs))
+            return s
+        }
+        // Collapsed: the compact one-line summary (quieter, secondary) + chevron.
+        let s = NSMutableAttributedString(string: collapsedSummary(), attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor])
+        s.append(NSAttributedString(string: "  \(chevron)", attributes: chevronAttrs))
+        return s
+    }
+
+    /// The header logo's lamp colour, by the most urgent state across rows (mirrors the menu-bar glyph).
+    private func headerLamp() -> NSColor {
+        if lastRows.contains(where: { $0.waitReason != nil || $0.verdict == .failed }) { return .systemRed }
+        if lastRows.contains(where: { $0.spinning }) { return .systemTeal }
+        if lastRows.contains(where: { $0.verdict != nil }) { return .systemGreen }
+        return .secondaryLabelColor
     }
 
     /// Compact one-line summary shown when collapsed, in priority order.
@@ -350,11 +376,12 @@ final class SessionRowView: NSView {
 
         glyph.font = .systemFont(ofSize: 16)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        stateLabel.font = .systemFont(ofSize: 11, weight: .medium)
 
         cell.orientation = .vertical
         cell.alignment = .leading
-        cell.spacing = 1
+        cell.spacing = 2
         cell.addArrangedSubview(titleLabel)
         cell.addArrangedSubview(stateLabel)
 
@@ -390,7 +417,7 @@ final class SessionRowView: NSView {
         outer.orientation = .vertical
         outer.alignment = .leading
         outer.spacing = 4
-        outer.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 10)   // padding inside the tint
+        outer.edgeInsets = NSEdgeInsets(top: 5, left: 9, bottom: 5, right: 11)   // padding inside the tint
         outer.translatesAutoresizingMaskIntoConstraints = false
         addSubview(outer)
         NSLayoutConstraint.activate([
@@ -423,7 +450,7 @@ final class SessionRowView: NSView {
         // Per-state background tint + the theme's status cue.
         currentRow = row
         closeButton.isHidden = (row.verdict == nil)   // only finished/failed rows can be dismissed
-        layer?.backgroundColor = theme.tint(for: row).withAlphaComponent(0.13).cgColor
+        layer?.backgroundColor = theme.tint(for: row).withAlphaComponent(0.16).cgColor
         renderIndicator(frame: 0)
 
         // Disclosure + expanded detail: a session line (project name) plus rich sub-agent rows.

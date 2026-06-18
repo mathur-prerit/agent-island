@@ -1,0 +1,87 @@
+name: Release
+
+# Build the prebuilt artifacts install.sh downloads, and attach them to the GitHub Release on a version
+# tag (v*). Two arches so both Apple Silicon and Intel get a native prebuilt; install.sh falls back to a
+# from-source build for any arch/platform without an asset.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.3.0)'
+        required: true
+
+permissions:
+  contents: write   # required for softprops/action-gh-release to create/update the release
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-14, arch: arm64 }    # Apple Silicon
+          - { runner: macos-13, arch: x86_64 }   # Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag + version
+        id: v
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Stamp CLI version from the tag
+        # build-app.sh stamps the app's Info.plist, but the management CLI's version is a compiled-in
+        # literal (CLIConstants.version). Stamp it from the tag too, or `agentisland version` would lie
+        # and `agentisland update` would offer an "update" forever (installed<latest) after the first bump.
+        run: |
+          ver="${{ steps.v.outputs.ver }}"
+          sed -i '' "s/public static let version = \"[^\"]*\"/public static let version = \"${ver}\"/" Sources/AgentIslandCLICore/CLIConstants.swift
+          grep 'public static let version' Sources/AgentIslandCLICore/CLIConstants.swift
+
+      - name: Build app + CLIs (release), version-stamped from the tag
+        run: |
+          VERSION="${{ steps.v.outputs.ver }}" bash Scripts/build-app.sh
+          swift build -c release --product agentisland
+
+      - name: Ad-hoc codesign the app
+        # Not Developer-ID/notarized — install.sh also strips quarantine on download. Ad-hoc signing keeps
+        # the bundle from showing "damaged" once de-quarantined.
+        run: codesign --force --deep --sign - build/AgentIsland.app
+
+      - name: Stage CLIs under their on-PATH names
+        # The hook bridge builds as AgentIslandHookCLI but MUST ship/install as agentisland-hook.
+        run: |
+          mkdir -p clistage
+          cp .build/release/agentisland        clistage/agentisland
+          cp .build/release/AgentIslandHookCLI clistage/agentisland-hook
+
+      - name: Package artifacts (ditto preserves the bundle + bits)
+        run: |
+          ver="${{ steps.v.outputs.ver }}"; arch="${{ matrix.arch }}"
+          # App zip: keep the AgentIsland.app parent so it extracts as a bundle.
+          ditto -c -k --sequesterRsrc --keepParent build/AgentIsland.app "AgentIsland-${ver}-${arch}.zip"
+          # CLI zip: flat (no parent dir) so install.sh finds <tmp>/cli/agentisland directly.
+          ditto -c -k clistage "agentisland-cli-${ver}-${arch}.zip"
+          shasum -a 256 "AgentIsland-${ver}-${arch}.zip" "agentisland-cli-${ver}-${arch}.zip" > "checksums-${arch}.txt"
+
+      # NOTE: the two matrix jobs (arm64 + x86_64) both attach to the SAME release. softprops/action-gh-release
+      # handles concurrent uploads of DISTINCT asset names (each job uploads its own -<arch> files), so this is
+      # safe. Do NOT add a `concurrency` group keyed on the ref — it would cancel one arch. Publish as a full
+      # (non-prerelease) release so install.sh's `releases/latest` resolves it (it falls back to the releases
+      # list if not, but the one-liner is snappiest when /latest hits).
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.v.outputs.tag }}
+          fail_on_unmatched_files: true
+          files: |
+            AgentIsland-${{ steps.v.outputs.ver }}-${{ matrix.arch }}.zip
+            agentisland-cli-${{ steps.v.outputs.ver }}-${{ matrix.arch }}.zip
+            checksums-${{ matrix.arch }}.txt

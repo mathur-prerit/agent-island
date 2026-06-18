@@ -1,9 +1,9 @@
 import Foundation
 
-// PURE validation for a candidate `$HOME` value. Lives in this AppKit-free, side-effect-free library
-// (not the `agentisland` executable's `HomeDir`) so the self-test can cover the rules with no process
-// env and no real filesystem: the only effectful input — "does this path name an existing directory?"
-// — is passed in as a closure, so tests inject a stub and the real `HomeDir` injects `FileManager`.
+// PURE validation for a candidate `$HOME` value. Pure (no process env, no real filesystem) so the
+// self-test can cover the rules directly: the only effectful input — "does this path name an existing
+// directory?" — is passed in as a closure, so tests inject a stub while the sibling `HomeDir` (same
+// module) injects `FileManager`.
 //
 // Why: `HomeDir` previously accepted ANY non-empty `$HOME`, so `HOME="/"` or whitespace produced
 // nonsense roots (`//.agent-island`, ` /.claude/settings.json`) and `uninstall` would "succeed" against
