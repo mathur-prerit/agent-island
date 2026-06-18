@@ -15,7 +15,7 @@ cd "$ROOT"
 # version a bare `swift run AgentIslandApp` reports (no bundle plist), so they must agree.
 # Overridable so the release CI can stamp the git tag into the plist (VERSION=${TAG#v} bash build-app.sh).
 # Keep the 0.3.0 fallback in lockstep with CLIConstants.version + the AppInfo.version fallback.
-VERSION="${VERSION:-0.3.5}"
+VERSION="${VERSION:-0.3.6}"
 
 echo "Building AgentIslandApp + daemon + hook bridge + management CLI (release)…"
 swift build -c release --product AgentIslandApp
@@ -101,6 +101,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
+  <!-- Click-to-focus sends Apple Events to the terminal (e.g. iTerm2) to raise the owning
+       window. macOS requires this usage string to present the Automation consent prompt;
+       without it the event is denied with no UI and focus silently does nothing. -->
+  <key>NSAppleEventsUsageDescription</key><string>agent-island focuses the terminal window running your agent session when you click its island.</string>
 </dict>
 </plist>
 PLIST

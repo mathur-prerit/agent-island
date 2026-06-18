@@ -876,12 +876,17 @@ final class AppController: NSObject, NSMenuDelegate {
     /// Raise the terminal window/tab that owns this session. Identity is captured at SessionStart
     /// (daemon mode only); polling-mode or unknown-host rows have no identity and no-op gracefully.
     private func focusWindow(_ id: String) {
-        guard let ident = windowIdentities[id] else { return }
+        guard let ident = windowIdentities[id] else {
+            NSLog("agent-island: click-to-focus — no window identity captured for session \(id)")
+            return
+        }
         if ident.termProgram == "iTerm.app", let guid = itermGUID(from: ident.itermSessionID) {
             focusITerm2(guid: guid)
         } else if let bundle = ident.bundleID,
                   let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
             app.activate(options: [.activateIgnoringOtherApps])
+        } else {
+            NSLog("agent-island: click-to-focus — no focusable terminal for session \(id) (term=\(ident.termProgram ?? "nil") bundle=\(ident.bundleID ?? "nil"))")
         }
     }
 
@@ -908,6 +913,10 @@ final class AppController: NSObject, NSMenuDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             var err: NSDictionary?
             NSAppleScript(source: script)?.executeAndReturnError(&err)
+            // -1743 (errAEEventNotPermitted) here means macOS denied the Apple Event — the app
+            // lacks Automation permission for the terminal. Logged (not swallowed) so the failure
+            // is diagnosable instead of a silent no-op.
+            if let err { NSLog("agent-island: iTerm2 click-to-focus failed: \(err)") }
         }
     }
 
