@@ -4,6 +4,23 @@ A quirky, quiet, always-on-top macOS status **island** that watches your Claude 
 
 > **Status:** working v0 — menu-bar item + a collapsible, priority-ordered floating island (collapsed by default; expands to a scrollable list that animates only the running session), personas, live step + token counts, and an event-driven daemon (the default, via a reversible first-launch setup) are all in. Verified core logic with 458 self-test checks. A settings UI is still to come.
 
+## Demo
+
+The menu-bar mark is a little **lighthouse** — its lamp + sweeping beam signal state at a glance: calm when idle, beam **sweeping** while agents work (with the running count beside it), **red** when one needs you, **green** when done.
+
+![menu-bar lighthouse states — idle, working, waiting, finished](docs/media/menubar-states.gif)
+
+<table>
+<tr>
+<td align="center"><img src="docs/media/app-icon.png" width="120"><br><sub>app icon</sub></td>
+<td align="center"><img src="docs/media/menubar-states.png" width="420"><br><sub>menu-bar states</sub></td>
+</tr>
+</table>
+
+*(Visuals rendered from the app's own drawing code.)*
+
+**Features at a glance:** menu-bar lighthouse with a live running/waiting count + sweeping beam · a collapsible floating **island** listing every active session (working / waiting-for-you / failed / done) with personas, step + token counts, and click-to-focus the owning terminal · **event-driven** daemon (instant updates) with a polling fallback · swappable **animation themes** (Road Trip · Minimal · Pixel Critter) with per-theme picker icons + optional sound cues · **Launch at login** + **Keep Mac awake** toggles · works with **Claude Code** and **OpenCode** sessions · a release-pinned `install.sh` + an `agentisland` management CLI (themes, config, update, uninstall).
+
 ## Requirements
 
 - **macOS 13+**
