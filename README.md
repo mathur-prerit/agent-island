@@ -132,7 +132,7 @@ Notes that keep it honest:
 
 A **theme** decides what each session's status indicator looks (and sounds) like per state — idle / working / waiting / finished / failed — plus the row's background tint and any lifecycle sounds. There are two kinds; you author the **data** kind (no Swift, no compiling):
 
-- **Code themes** are compiled into the app (e.g. *Road Runner*'s scrolling token journey). Adding one means a Swift file — see the spec below.
+- **Code themes** are compiled into the app (e.g. *Road Trip*'s scrolling token journey, or *Pixel Jumper*'s side-scrolling platformer). Adding one means a Swift file — see the spec below.
 - **Data themes** are a declarative `theme.json` + asset files (images, sprite sheets, sounds). One generic interpreter renders any such folder, so they can be **bundled, installed locally, or downloaded**. This is what you make.
 
 ### 1. Lay out the folder
@@ -214,7 +214,7 @@ swift run AgentIslandDemo         # the state engine on your real ~/.claude tran
 
 Handy while developing:
 
-- **Render canaries** (headless, no GUI needed): `swift run AgentIslandApp -renderTheme <id> /tmp/out.png` renders all six states of any theme to a labelled PNG; `-renderRoadSample /tmp/road.png` renders the Road Runner banner grid.
+- **Render canaries** (headless, no GUI needed): `swift run AgentIslandApp -renderTheme <id> /tmp/out.png` renders all six states of any theme to a labelled PNG; `-renderRoadSample /tmp/road.png` renders the Road Trip banner grid.
 - **Self-test discipline**: the runner is framework-free so it works without full Xcode. When you change behavior, add checks in `Sources/AgentIslandSelfTest/main.swift` and keep it green; NSView rendering is verified by eye.
 - **Sandboxed effects**: the destructive paths (`uninstall`, hook install) honor `$HOME`, so exercise them with `HOME=$(mktemp -d) swift run agentisland uninstall --yes` to keep your real `~/.claude` / `~/.agent-island` untouched.
 - **Releases**: pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds + attaches the per-arch prebuilt `.app` and CLI zips that `install.sh` downloads. Keep `CLIConstants.version`, `Scripts/build-app.sh`'s `VERSION`, and the tag in lockstep.

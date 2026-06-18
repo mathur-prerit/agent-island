@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import AgentIslandCore
 
-// MARK: - Road Runner theme (id "journey")
+// MARK: - Road Trip theme (id "journey")  (formerly "Road Runner")
 
 /// Token burn drives a journey: a vehicle that upgrades by tokens used (bike→car→train→plane)
 /// "drives" along a scrolling road past roadside signs every 5K tokens, with signboard "towns" at
@@ -14,10 +14,11 @@ import AgentIslandCore
 /// success and a game-over tune on failure.
 struct JourneyTheme: IslandTheme {
     let id = "journey"             // persisted in UserDefaults["islandTheme"] — keep stable
-    let displayName = "Road Runner"
+    let displayName = "Road Trip"
     let showsPersonaGlyph = false   // the road scene is the indicator
 
     func makeScene() -> ThemeScene { JourneyScene() }
+    func icon() -> NSImage { IslandIcons.symbol("car.fill", pointSize: 12) }
 
     func tint(for row: IslandPanel.Row) -> NSColor { stateTint(row) }
 

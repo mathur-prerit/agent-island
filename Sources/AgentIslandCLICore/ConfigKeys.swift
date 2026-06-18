@@ -52,7 +52,7 @@ public enum ConfigKeys {
     /// dismissed-update version) are deliberately NOT exposed here — they aren't user knobs.
     public static let all: [ConfigKey] = [
         ConfigKey(key: "islandTheme",
-                  summary: "Active animation theme id (e.g. journey, minimal, critter).",
+                  summary: "Active animation theme id (e.g. journey, jumper, minimal, critter).",
                   kind: .string(allowed: [])),
         ConfigKey(key: "soundEnabled",
                   summary: "Play lifecycle sound cues (true/false).",

@@ -17,7 +17,7 @@ enum ThemeCommands {
     /// so these mirror `Themes.codeThemes` + `ManifestThemeDiscovery.bundledIDs` — kept in lockstep with
     /// the app. (Installed + catalog themes ARE discovered dynamically below.)
     private static let codeThemeIDs: [(id: String, name: String)] =
-        [("journey", "Road Runner"), ("minimal", "Minimal")]
+        [("journey", "Road Trip"), ("jumper", "Pixel Jumper"), ("minimal", "Minimal")]
     private static let bundledThemeIDs: [(id: String, name: String)] = [("critter", "Pixel Critter")]
 
     // MARK: - list

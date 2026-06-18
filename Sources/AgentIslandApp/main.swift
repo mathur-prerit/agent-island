@@ -202,6 +202,7 @@ final class AppController: NSObject, NSMenuDelegate {
         for t in Themes.all {
             let ti = NSMenuItem(title: t.displayName, action: #selector(pickTheme(_:)), keyEquivalent: "")
             ti.target = self; ti.representedObject = t.id; ti.state = (t.id == currentTheme) ? .on : .off
+            ti.image = t.icon()   // the theme's little logo beside its name
             themeMenu.addItem(ti)
         }
         // Downloadable themes from the hosted catalog: only those NOT already installed. An entry the
