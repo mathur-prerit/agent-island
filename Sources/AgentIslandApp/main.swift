@@ -19,6 +19,12 @@ final class AppController: NSObject {
     private var islandEnabled = true
     private var dismissedFinished: Set<String> = []   // finished sessions the user removed from view
     private var lastStatus: [String: AgentStatus] = [:]   // prev status per session, for sound-cue transitions
+    // "Keep Mac awake": while ON and a session is working, hold an idle-system-sleep assertion so a
+    // long agent run isn't suspended when you step away. (Won't keep the Mac awake with the lid
+    // closed on battery — clamshell sleep is a separate mechanism.)
+    private var sleepToken: NSObjectProtocol?
+    private let keepAwakeKey = "islandKeepAwake"   // UserDefaults bool; default off
+
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -110,6 +116,13 @@ final class AppController: NSObject {
         soundSetItem.submenu = soundSetMenu
         menu.addItem(soundSetItem)
 
+        // Opt-in: prevent OS idle system-sleep while an agent is working (good battery citizen —
+        // only asserts when ON and something is actually working; see updateSleepAssertion).
+        let keepAwakeToggle = NSMenuItem(title: "Keep Mac awake", action: #selector(toggleKeepAwake), keyEquivalent: "")
+        keepAwakeToggle.target = self; keepAwakeToggle.isEnabled = true
+        keepAwakeToggle.state = UserDefaults.standard.bool(forKey: keepAwakeKey) ? .on : .off
+        menu.addItem(keepAwakeToggle)
+
         menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
         clear.target = self
@@ -126,6 +139,7 @@ final class AppController: NSObject {
 
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
+        updateSleepAssertion(on: UserDefaults.standard.bool(forKey: keepAwakeKey), working: working)
         let glyph: String
         let glyphColor: NSColor
         if waiting > 0 { glyph = "● \(waiting)"; glyphColor = .systemRed }
@@ -207,7 +221,10 @@ final class AppController: NSObject {
         return item
     }
 
-    @objc private func quit() { NSApplication.shared.terminate(nil) }
+    @objc private func quit() {
+        if let token = sleepToken { ProcessInfo.processInfo.endActivity(token); sleepToken = nil }
+        NSApplication.shared.terminate(nil)
+    }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
 
     // Remove a single finished session from view (its ✕), or all finished at once (menu).
@@ -236,6 +253,26 @@ final class AppController: NSObject {
         guard let id = sender.representedObject as? String else { return }
         UserDefaults.standard.set(id, forKey: AppController.soundSetKey)
         refresh()
+    }
+
+    @objc private func toggleKeepAwake() {
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: keepAwakeKey), forKey: keepAwakeKey)
+        refresh()
+    }
+
+    /// Hold an idle-system-sleep assertion only while the toggle is ON and a session is working;
+    /// release it otherwise. Held strongly for its whole lifetime (dropping it lets the Mac sleep).
+    private func updateSleepAssertion(on: Bool, working: Bool) {
+        if on && working {
+            if sleepToken == nil {
+                sleepToken = ProcessInfo.processInfo.beginActivity(
+                    options: [.idleSystemSleepDisabled],
+                    reason: "agent-island: agent session running")
+            }
+        } else if let token = sleepToken {
+            ProcessInfo.processInfo.endActivity(token)
+            sleepToken = nil
+        }
     }
 
     // MARK: - Sound cues (theme-owned lifecycle jingles)
