@@ -77,8 +77,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private let openCodeProvider = OpenCodeProvider()
 
     func start() {
-        // Seed the robot-head "agent" glyph before the first refresh() (overwritten per-state below).
-        statusItem.button?.image = IslandIcons.robotHead(color: .secondaryLabelColor)
+        // Seed the lighthouse glyph (a mini of the app logo) before the first refresh() (re-tinted below).
+        statusItem.button?.image = IslandIcons.lighthouse(lamp: .secondaryLabelColor, beam: false)
         statusItem.button?.imagePosition = .imageLeading
         menu.autoenablesItems = false
         statusItem.menu = menu
@@ -283,8 +283,10 @@ final class AppController: NSObject, NSMenuDelegate {
         else if finishedPresent { tintColor = .systemGreen; countText = "" }
         else { tintColor = .secondaryLabelColor; countText = "" }
         if let button = statusItem.button {
-            button.image = IslandIcons.robotHead(
-                color: tintColor,
+            // The lamp/beam carry the state colour on a neutral (labelColor) lighthouse; the beam lights
+            // only while actively working or waiting (idle/finished are calm).
+            button.image = IslandIcons.lighthouse(
+                lamp: tintColor, beam: working || waiting > 0,
                 showUpdateDot: updateCue && waiting == 0 && !working && !finishedPresent)
             button.imagePosition = .imageLeading
             // The waiting count rides as text beside the icon (variableLength sizes the item to fit);
