@@ -5,6 +5,7 @@ import PersonaKit
 import HookInstall
 import AgentIslandDaemon
 import AgentIslandThemes
+import AgentIslandCLICore
 
 // Framework-free self-test. Runs under Command Line Tools (no Xcode/XCTest/Testing).
 // `swift run AgentIslandSelfTest` — exits non-zero on any failure (usable in CI).
@@ -138,6 +139,93 @@ check(ourEntryCount(bothHooked, event: "Stop", command: appCmd) == 1, "U4b: app+
 if case .success(let cleaned) = SettingsMerge.uninstall(existing: appHooked, command: cliCmd) {
     check(ourEntryCount(cleaned, event: "Stop", command: appCmd) == 0, "U4b: CLI-form uninstall removes the app-installed hook (no strand)")
 } else { check(false, "U4b: cross-form uninstall succeeded") }
+
+// U4c: the `curl|sh` installer wires the hook under the binary name `agentisland-hook`, so its
+// argv[0]-derived command is `agentisland-hook relay` (bare or absolute) — a DIFFERENT token than the
+// app's `AgentIslandHookCLI`. The signature matcher must recognise BOTH naming styles, or `uninstall`
+// (which reverses via the `AgentIslandHookCLI relay` form) strands the installer-wired hook pointing at
+// a deleted binary, erroring on every Claude Code lifecycle event. (These assertions FAIL before the
+// matcher fix and PASS after.)
+let hookBareCmd = "agentisland-hook relay"
+let hookAbsCmd  = "/usr/local/bin/agentisland-hook relay"
+check(SettingsMerge.isAgentIslandRelay(hookBareCmd) && SettingsMerge.isAgentIslandRelay(hookAbsCmd),
+      "U4c: installer-style `agentisland-hook relay` (bare + abs) recognised as our relay")
+check(SettingsMerge.isAgentIslandRelay(appCmd),
+      "U4c: app-style `\"<abs>/AgentIslandHookCLI\" relay` STILL recognised after the matcher widening")
+// Foreign hooks (and a bare `relay` with no agent-island token) must NOT be mistaken for ours.
+check(!SettingsMerge.isAgentIslandRelay("/usr/bin/say done")
+      && !SettingsMerge.isAgentIslandRelay("/opt/some/other-tool relay")
+      && !SettingsMerge.isAgentIslandRelay("relay"),
+      "U4c: a foreign command (even one ending in ' relay') is NOT treated as our relay")
+// uninstall (reversing with the CLI/app `AgentIslandHookCLI relay` form, as `agentisland uninstall`
+// does) removes EVERY agent-island relay strand across both naming styles, while preserving a foreign
+// hook and unrelated keys.
+let reversalCmd = "AgentIslandHookCLI relay"   // the form SettingsFile.uninstall is invoked with
+let mixedSettings = Data("""
+{
+  "topKey": 99,
+  "hooks": {
+    "Stop": [
+      {"hooks":[{"type":"command","command":"agentisland-hook relay"}]},
+      {"hooks":[{"type":"command","command":"/usr/local/bin/agentisland-hook relay"}]},
+      {"hooks":[{"type":"command","command":"\\"/Applications/AgentIsland.app/Contents/MacOS/AgentIslandHookCLI\\" relay"}]},
+      {"hooks":[{"type":"command","command":"/usr/bin/say boop"}]}
+    ]
+  }
+}
+""".utf8)
+if case .success(let cleaned) = SettingsMerge.uninstall(existing: mixedSettings, command: reversalCmd) {
+    let root = (try? JSONSerialization.jsonObject(with: cleaned) as? [String: Any]) ?? [:]
+    let stop = ((root["hooks"] as? [String: Any])?["Stop"] as? [[String: Any]]) ?? []
+    func cmds(_ entries: [[String: Any]]) -> [String] {
+        entries.flatMap { ($0["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? [] }
+    }
+    let remaining = cmds(stop)
+    check(!remaining.contains("agentisland-hook relay"), "U4c: uninstall removes the bare `agentisland-hook relay` strand")
+    check(!remaining.contains("/usr/local/bin/agentisland-hook relay"), "U4c: uninstall removes the abs `/usr/local/bin/agentisland-hook relay` strand")
+    check(!remaining.contains(where: { $0.contains("AgentIslandHookCLI") }), "U4c: uninstall still removes the app-style `\"<abs>/AgentIslandHookCLI\" relay`")
+    check(remaining == ["/usr/bin/say boop"], "U4c: uninstall PRESERVES the foreign `/usr/bin/say` hook (only ours removed)")
+    check((root["topKey"] as? Int) == 99, "U4c: uninstall preserves unrelated top-level keys")
+} else { check(false, "U4c: mixed-style uninstall succeeded") }
+
+// U4d: composed round-trip — install the hook exactly as the `curl|sh` installer does (binary named
+// `agentisland-hook`, so command = `agentisland-hook relay`) via the real SettingsFile on a temp file,
+// then run the uninstall reversal (`AgentIslandHookCLI relay`, as `agentisland uninstall` does) and
+// assert the file is hook-free afterward. (FAILS before the matcher fix — the strand survives.)
+do {
+    let rtDir = NSTemporaryDirectory() + "ai-hook-roundtrip-\(getpid())-\(UUID().uuidString)"
+    try? FileManager.default.createDirectory(atPath: rtDir, withIntermediateDirectories: true)
+    let rtPath = rtDir + "/settings.json"
+    try? Data(#"{"keep":1}"#.utf8).write(to: URL(fileURLWithPath: rtPath))
+    let rtEvents = ["Stop", "UserPromptSubmit", "SessionEnd"]
+    _ = try? SettingsFile.install(settingsPath: rtPath, command: "agentisland-hook relay", events: rtEvents)
+    // sanity: the installer-named hook really landed
+    let afterInstall = (try? Data(contentsOf: URL(fileURLWithPath: rtPath))) ?? Data()
+    let installRoot = (try? JSONSerialization.jsonObject(with: afterInstall) as? [String: Any]) ?? [:]
+    let installHooks = (installRoot["hooks"] as? [String: Any]) ?? [:]
+    let landed = rtEvents.allSatisfy { ev in
+        (((installHooks[ev] as? [[String: Any]]) ?? []).flatMap {
+            ($0["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? []
+        }).contains("agentisland-hook relay")
+    }
+    check(landed, "U4d: round-trip — installer-style `agentisland-hook relay` wires into every event")
+    // now reverse via the app/CLI canonical form, as `agentisland uninstall` does
+    _ = try? SettingsFile.uninstall(settingsPath: rtPath, command: "AgentIslandHookCLI relay")
+    let afterUninstall = (try? Data(contentsOf: URL(fileURLWithPath: rtPath))) ?? Data()
+    let upRoot = (try? JSONSerialization.jsonObject(with: afterUninstall) as? [String: Any]) ?? [:]
+    let upHooks = (upRoot["hooks"] as? [String: Any]) ?? [:]
+    // Detect a surviving strand by the LITERAL installed command text (not via isAgentIslandRelay) so
+    // this assertion is independent of the matcher under test — under the buggy matcher the strand
+    // would survive AND go undetected by isAgentIslandRelay, so this must catch the raw string.
+    let anyRelayLeft = upHooks.values.contains { value in
+        (((value as? [[String: Any]]) ?? []).flatMap {
+            ($0["hooks"] as? [[String: Any]])?.compactMap { $0["command"] as? String } ?? []
+        }).contains { $0.contains("relay") }
+    }
+    check(!anyRelayLeft, "U4d: round-trip — after the reversal NO agent-island relay hook strands (settings is hook-free)")
+    check((upRoot["keep"] as? Int) == 1, "U4d: round-trip — unrelated keys survive the install/uninstall cycle")
+    try? FileManager.default.removeItem(atPath: rtDir)
+}
 
 // --- Daemon IPC (U3) ---
 check(FrameCodec.isAcceptableLength(0), "frame length 0 acceptable")
@@ -1022,6 +1110,142 @@ check(!ThemeCatalogEntry.isHTTPSURL("http://example.com/x.zip"), "url-scheme: ht
 check(!ThemeCatalogEntry.isHTTPSURL("file:///etc/passwd"), "url-scheme: file:// rejected")
 check(!ThemeCatalogEntry.isHTTPSURL("ftp://example.com/x.zip"), "url-scheme: ftp:// rejected")
 check(!ThemeCatalogEntry.isHTTPSURL("not a url at all"), "url-scheme: scheme-less string rejected")
+
+// --- Management CLI (`agentisland`): pure parse/dispatch, config allowlist, uninstall plan, theme-add
+// classification. All network-free + real-FS-free — the executable performs the effects. ---
+
+// Command parsing (total: every input → a Command).
+check(CommandParser.parse([]) == .help, "cli-parse: no args -> help")
+check(CommandParser.parse(["--help"]) == .help, "cli-parse: --help -> help")
+check(CommandParser.parse(["help"]) == .help, "cli-parse: help -> help")
+check(CommandParser.parse(["version"]) == .version, "cli-parse: version")
+check(CommandParser.parse(["--version"]) == .version, "cli-parse: --version")
+check(CommandParser.parse(["theme"]) == .themeList, "cli-parse: bare theme -> list")
+check(CommandParser.parse(["theme", "list"]) == .themeList, "cli-parse: theme list")
+check(CommandParser.parse(["theme", "add", "critter"]) == .themeAdd(idOrURL: "critter"), "cli-parse: theme add <id>")
+check(CommandParser.parse(["theme", "set", "minimal"]) == .themeSet(id: "minimal"), "cli-parse: theme set <id>")
+check({ if case .usageError = CommandParser.parse(["theme", "add"]) { return true }; return false }(),
+      "cli-parse: theme add with no arg -> usageError")
+check({ if case .usageError = CommandParser.parse(["theme", "bogus"]) { return true }; return false }(),
+      "cli-parse: unknown theme subcommand -> usageError")
+check(CommandParser.parse(["config"]) == .configList, "cli-parse: bare config -> list")
+check(CommandParser.parse(["config", "get", "islandTheme"]) == .configGet(key: "islandTheme"), "cli-parse: config get")
+check(CommandParser.parse(["config", "set", "soundCueSet", "default"]) == .configSet(key: "soundCueSet", value: "default"),
+      "cli-parse: config set")
+check({ if case .usageError = CommandParser.parse(["config", "set", "onlyKey"]) { return true }; return false }(),
+      "cli-parse: config set missing value -> usageError")
+check(CommandParser.parse(["update"]) == .update, "cli-parse: update")
+check({ if case .usageError = CommandParser.parse(["update", "now"]) { return true }; return false }(),
+      "cli-parse: update with extra arg -> usageError")
+check(CommandParser.parse(["uninstall"]) == .uninstall(yes: false, dryRun: false), "cli-parse: uninstall (no flags)")
+check(CommandParser.parse(["uninstall", "--yes"]) == .uninstall(yes: true, dryRun: false), "cli-parse: uninstall --yes")
+check(CommandParser.parse(["uninstall", "--dry-run"]) == .uninstall(yes: false, dryRun: true), "cli-parse: uninstall --dry-run")
+check(CommandParser.parse(["uninstall", "--yes", "--dry-run"]) == .uninstall(yes: true, dryRun: true),
+      "cli-parse: uninstall --yes --dry-run")
+check({ if case .usageError = CommandParser.parse(["uninstall", "--force"]) { return true }; return false }(),
+      "cli-parse: uninstall unknown flag -> usageError")
+check(CommandParser.parse(["start-on-boot"]) == .startOnBoot(.status), "cli-parse: bare start-on-boot -> status")
+check(CommandParser.parse(["start-on-boot", "on"]) == .startOnBoot(.on), "cli-parse: start-on-boot on")
+check(CommandParser.parse(["start-on-boot", "off"]) == .startOnBoot(.off), "cli-parse: start-on-boot off")
+check({ if case .usageError = CommandParser.parse(["start-on-boot", "maybe"]) { return true }; return false }(),
+      "cli-parse: start-on-boot bad verb -> usageError")
+check({ if case .unknown(let t) = CommandParser.parse(["frobnicate"]) { return t == "frobnicate" }; return false }(),
+      "cli-parse: unknown top-level command")
+
+// Help/usage surface mentions every subcommand (so README and --help can't silently drift apart).
+let usage = Help.usage
+for token in ["theme list", "theme add", "theme set", "config", "config get", "config set",
+              "update", "start-on-boot", "uninstall", "version"] {
+    check(usage.contains(token), "cli-help: usage mentions '\(token)'")
+}
+
+// Config allowlist + validation (pure — no defaults store touched).
+check(ConfigKeys.lookup("islandTheme") != nil, "cli-config: islandTheme is a known key")
+check(ConfigKeys.lookup("madeUpKey") == nil, "cli-config: an unknown key isn't on the allowlist")
+check({ if case .failure(.unknownKey) = ConfigKeys.validate(key: "nope", rawValue: "x") { return true }; return false }(),
+      "cli-config: validate rejects an unknown key")
+check(ConfigKeys.validate(key: "islandKeepAwake", rawValue: "true") == .success(.bool(true)),
+      "cli-config: bool key accepts 'true'")
+check(ConfigKeys.validate(key: "islandKeepAwake", rawValue: "off") == .success(.bool(false)),
+      "cli-config: bool key accepts 'off' -> false")
+check({ if case .failure(.invalidBool) = ConfigKeys.validate(key: "islandKeepAwake", rawValue: "maybe") { return true }; return false }(),
+      "cli-config: bool key rejects a non-bool")
+check(ConfigKeys.validate(key: "soundCueSet", rawValue: "default") == .success(.string("default")),
+      "cli-config: enum key accepts an allowed value")
+check({ if case .failure(.notAllowed) = ConfigKeys.validate(key: "soundCueSet", rawValue: "loud") { return true }; return false }(),
+      "cli-config: enum key rejects an off-list value")
+check(ConfigKeys.validate(key: "islandTheme", rawValue: "anything") == .success(.string("anything")),
+      "cli-config: free-string key (islandTheme) accepts any value (ids are dynamic)")
+
+// Uninstall PLAN against a temp HOME — assert EXACTLY what it would target (nothing performed).
+let cliSandboxHome = "/tmp/agentisland-selftest-\(UUID().uuidString)"
+let cliPaths = InstallPaths(home: cliSandboxHome, appPath: cliSandboxHome + "/App/AgentIsland.app",
+                            binDir: cliSandboxHome + "/bin")
+let cliPlan = UninstallPlan.plan(cliPaths)
+check(cliPlan.first == .reverseHooks(settingsPath: cliSandboxHome + "/.claude/settings.json"),
+      "cli-uninstall: plan reverses hooks FIRST (so a half-done uninstall still works)")
+check(cliPlan.contains(.unregisterLoginItem), "cli-uninstall: plan unregisters the login item")
+check(cliPlan.contains(.removeDirectory(path: cliSandboxHome + "/.agent-island")),
+      "cli-uninstall: plan removes ~/.agent-island")
+check(cliPlan.contains(.removeApp(path: cliSandboxHome + "/App/AgentIsland.app")),
+      "cli-uninstall: plan removes the .app")
+check(cliPlan.contains(.removeBinary(path: cliSandboxHome + "/bin/agentisland")),
+      "cli-uninstall: plan removes the agentisland binary")
+check(cliPlan.contains(.removeBinary(path: cliSandboxHome + "/bin/agentisland-hook")),
+      "cli-uninstall: plan removes the agentisland-hook binary")
+// CRITICAL: every path the plan targets stays UNDER the (sandbox) home — never the real system.
+let homeDerived: [String?] = cliPlan.map { action in
+    switch action {
+    case .reverseHooks(let p), .removeBinary(let p), .removeDirectory(let p), .removeApp(let p): return p
+    case .unregisterLoginItem: return nil
+    }
+}
+check(homeDerived.compactMap { $0 }.allSatisfy { $0.hasPrefix(cliSandboxHome) },
+      "cli-uninstall: EVERY filesystem target is under the sandbox home (never escapes it)")
+check(cliPlan.count == 6, "cli-uninstall: plan is exactly 6 actions (hooks, login item, 2 binaries, dir, app)")
+
+// HomeDir validation (pure: `HomeValidation` decides whether a `$HOME` is usable; the effectful
+// "is it an existing dir?" check is injected). A degenerate HOME ("/" or whitespace) must be REJECTED
+// so the destructive uninstall can't silently "succeed" against `//.agent-island`; a real existing dir
+// (the `HOME=$(mktemp -d)` sandbox) must be ACCEPTED so the dev workflow still lands in the sandbox.
+let allDirsExist: (String) -> Bool = { _ in true }
+check(!HomeValidation.isAcceptable("", dirExists: allDirsExist), "home-validation: empty HOME rejected")
+check(!HomeValidation.isAcceptable("   ", dirExists: allDirsExist), "home-validation: whitespace-only HOME rejected")
+check(!HomeValidation.isAcceptable("/", dirExists: allDirsExist), "home-validation: HOME='/' (filesystem root) rejected")
+check(!HomeValidation.isAcceptable("relative/path", dirExists: allDirsExist), "home-validation: a non-absolute HOME rejected")
+check(!HomeValidation.isAcceptable("/no/such/dir", dirExists: { _ in false }), "home-validation: an absolute but non-existent HOME rejected")
+check(HomeValidation.isAcceptable("/Users/me", dirExists: allDirsExist), "home-validation: an absolute existing dir accepted")
+check(HomeValidation.accepted("/Users/me", dirExists: allDirsExist) == "/Users/me", "home-validation: accepted returns the path when valid")
+check(HomeValidation.accepted("  /Users/me  ", dirExists: allDirsExist) == "/Users/me", "home-validation: accepted trims surrounding whitespace")
+check(HomeValidation.accepted("/", dirExists: allDirsExist) == nil, "home-validation: accepted returns nil for a rejected HOME (caller falls back)")
+// The real sandbox path the destructive-test workflow uses (HOME=$(mktemp -d)) must pass when present.
+let sandboxHome = NSTemporaryDirectory() + "ai-home-\(getpid())-\(UUID().uuidString)"
+try? FileManager.default.createDirectory(atPath: sandboxHome, withIntermediateDirectories: true)
+let realDirExists: (String) -> Bool = { p in
+    var isDir: ObjCBool = false
+    return FileManager.default.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue
+}
+check(HomeValidation.isAcceptable(sandboxHome, dirExists: realDirExists),
+      "home-validation: a real existing temp dir (the HOME=$(mktemp -d) sandbox) is accepted")
+try? FileManager.default.removeItem(atPath: sandboxHome)
+
+// theme-add classification (pure: id vs https url vs refused).
+check(ThemeAdd.classify("critter") == .catalogID("critter"), "cli-theme-add: a bare id classifies as a catalog id")
+check(ThemeAdd.classify("https://example.com/x.zip") == .directURL("https://example.com/x.zip"),
+      "cli-theme-add: an https url classifies as a direct download")
+check(ThemeAdd.classify("http://example.com/x.zip") == nil, "cli-theme-add: a plaintext http url is refused")
+check(ThemeAdd.classify("file:///etc/passwd") == nil, "cli-theme-add: a file:// url is refused (no id fallback)")
+check(ThemeAdd.classify("..") == nil, "cli-theme-add: an unsafe id ('..') is refused")
+check(ThemeAdd.classify("a/b") == nil, "cli-theme-add: an id with a separator is refused")
+// The self-verifying entry for a direct-url add has size/sha == the downloaded bytes (so the shared
+// installer's integrity verify is a tautology — every OTHER gate still runs unchanged).
+let cliBlob = Data("theme-bytes".utf8)
+let cliEntry = ThemeAdd.selfVerifyingEntry(id: "mytheme", url: "https://example.com/x.zip", data: cliBlob)
+check(cliEntry.id == "mytheme" && cliEntry.sizeBytes == cliBlob.count
+      && cliEntry.sha256 == ThemeCatalogEntry.sha256Hex(cliBlob),
+      "cli-theme-add: self-verifying entry's size+sha match the downloaded bytes")
+check(cliEntry.verify(cliBlob) == nil, "cli-theme-add: the self-verifying entry passes the shared integrity verify on its own bytes")
+check(cliEntry.verify(Data("tampered".utf8)) != nil, "cli-theme-add: a different blob still fails the shared verify")
 
 // Tidy up every fixture / install-root / scratch dir built above. (Top-level `defer` would be skipped
 // by the `exit()` below, so cleanup is explicit — matching the SettingsFile temp-dir teardown earlier.)

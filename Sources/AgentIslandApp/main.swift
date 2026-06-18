@@ -378,12 +378,43 @@ final class AppController: NSObject {
         }
     }
 
-    /// Act on the "update available" indicator. For now this opens the GitHub Releases page in the
-    /// browser. TODO(install-and-cli): once the self-updater ships, swap this to invoke the CLI
-    /// `update` (run the installed `agent-island update` so the user updates in place).
+    /// Act on the "update available" indicator. Prefers the installed `agentisland` management CLI: if
+    /// it's resolvable (a sibling of the app executable — how `build-app.sh`/`install.sh` lay it out —
+    /// or on a common PATH dir), open Terminal running `agentisland update` so the user sees (and
+    /// confirms) the in-place, build-from-source update interactively. Falls back to opening the GitHub
+    /// Releases page when the CLI isn't found (e.g. a bare `swift run` with no installed binary).
     @objc private func openUpdate() {
-        guard let url = URL(string: UpdateCheck.releasesPageURL) else { return }
-        NSWorkspace.shared.open(url)
+        if let cli = locateManagementCLI() {
+            // Launch Terminal on a short script that runs the updater then pauses so the window stays up.
+            let script = "clear; \"\(cli)\" update; echo; echo '(press return to close)'; read -r _"
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            // `open -a Terminal <file>` runs a shell script in a new Terminal window.
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("agentisland-update.command")
+            if (try? script.write(to: tmp, atomically: true, encoding: .utf8)) != nil {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tmp.path)
+                p.arguments = ["-a", "Terminal", tmp.path]
+                if (try? p.run()) != nil { return }
+            }
+        }
+        // Fallback: open the Releases page in the browser.
+        if let url = URL(string: UpdateCheck.releasesPageURL) { NSWorkspace.shared.open(url) }
+    }
+
+    /// Resolve the installed `agentisland` management CLI: first as a sibling of the running app
+    /// executable (the build/install layout), then in the common PATH dirs the installer uses. Returns
+    /// nil when no executable is found (then `openUpdate` falls back to the Releases page).
+    private func locateManagementCLI() -> String? {
+        let fm = FileManager.default
+        if let exe = Bundle.main.executablePath {
+            let sibling = (exe as NSString).deletingLastPathComponent + "/agentisland"
+            if fm.isExecutableFile(atPath: sibling) { return sibling }
+        }
+        for dir in ["/usr/local/bin", "/opt/homebrew/bin"] {
+            let p = dir + "/agentisland"
+            if fm.isExecutableFile(atPath: p) { return p }
+        }
+        return nil
     }
 
     /// Dismiss the offered update: persist the version so the badge stays quiet until a strictly-newer
