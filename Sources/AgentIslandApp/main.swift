@@ -19,6 +19,8 @@ final class AppController: NSObject {
     private var islandEnabled = true
     private var dismissedFinished: Set<String> = []   // finished sessions the user removed from view
     private var lastStatus: [String: AgentStatus] = [:]   // prev status per session, for sound-cue transitions
+    private let dismissedKey = "islandDismissedFinished"   // UserDefaults: persisted dismissedFinished ids
+
     // "Keep Mac awake": while ON and a session is working, hold an idle-system-sleep assertion so a
     // long agent run isn't suspended when you step away. (Won't keep the Mac awake with the lid
     // closed on battery — clamshell sleep is a separate mechanism.)
@@ -47,6 +49,7 @@ final class AppController: NSObject {
         statusItem.button?.title = "○"
         menu.autoenablesItems = false
         statusItem.menu = menu
+        dismissedFinished = Set(UserDefaults.standard.stringArray(forKey: dismissedKey) ?? [])
         island.onDismiss = { [weak self] id in self?.dismissFinished(id) }
         island.onFocus = { [weak self] id in self?.focusWindow(id) }
         refresh()
@@ -69,6 +72,7 @@ final class AppController: NSObject {
         // present AND still finished, so a session that resumes work (or a brand-new one) reappears.
         let finishedIDs = Set(sessions.filter { isFinished($0.status) }.map { $0.fullID })
         dismissedFinished.formIntersection(finishedIDs)
+        persistDismissed()   // prune-then-persist so the stored set never accumulates stale ids
         sessions = sessions.filter { !dismissedFinished.contains($0.fullID) }
 
         detectTransitions(in: sessions)
@@ -233,11 +237,15 @@ final class AppController: NSObject {
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
 
     // Remove a single finished session from view (its ✕), or all finished at once (menu).
-    private func dismissFinished(_ id: String) { dismissedFinished.insert(id); refresh() }
+    private func dismissFinished(_ id: String) { dismissedFinished.insert(id); persistDismissed(); refresh() }
     @objc private func clearFinished() {
         dismissedFinished.formUnion(activeSessions().filter { isFinished($0.status) }.map { $0.fullID })
+        persistDismissed()
         refresh()
     }
+
+    /// Persist the dismissed-finished set so removals survive relaunch (re-pruned each refresh()).
+    private func persistDismissed() { UserDefaults.standard.set(Array(dismissedFinished), forKey: dismissedKey) }
     @objc private func resetIslandPosition() { island.resetPosition() }
 
     @objc private func pickTheme(_ sender: NSMenuItem) {
