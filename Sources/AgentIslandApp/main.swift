@@ -407,9 +407,7 @@ final class AppController: NSObject {
             // time, per-sub-agent detail) is computed app-side from the transcript, read once.
             let path = snap.cwd.map { transcriptPath(cwd: $0, sessionID: snap.sessionID) }
             let lines = path.map { readLines($0) } ?? []
-            let tokens = TokenUsage.freshTokens(lines: lines)
-            let title = ConversationTitle.fromTranscript(lines: lines)
-            let startedAt = TranscriptClock.startedAt(lines: lines)
+            let digest = TranscriptDigest.scan(lines: lines)   // one pass: tokens/title/startedAt/steps
             var digests = path.map { subagentDigests(forTranscript: $0) } ?? []
             // If the sub-agent transcripts aren't on disk yet, fall back to the daemon's
             // running/done counts as nameless placeholders so the tally still shows.
@@ -418,8 +416,8 @@ final class AppController: NSObject {
                     + Array(repeating: SubagentDigest(name: "sub-agent", status: .finished(.success), tokens: 0, durationSeconds: nil), count: snap.subDone)
             }
             return Session(fullID: snap.sessionID, shortID: short, label: snap.label ?? short,
-                           title: title, status: AgentStatus(stateToken: snap.state),
-                           subDigests: digests, steps: 0, tokens: tokens, startedAt: startedAt)
+                           title: digest.title, status: AgentStatus(stateToken: snap.state),
+                           subDigests: digests, steps: 0, tokens: digest.tokens, startedAt: digest.startedAt)
         }
     }
 
@@ -453,15 +451,12 @@ final class AppController: NSObject {
                 if case .waitingForInput = rolled, Date().timeIntervalSince(mtime) > 600 {
                     rolled = .finished(.success)
                 }
-                let steps = records.reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
-                let tokens = TokenUsage.freshTokens(lines: lines)
-                let title = ConversationTitle.fromTranscript(lines: lines)
-                let startedAt = TranscriptClock.startedAt(lines: lines)
+                let digest = TranscriptDigest.scan(lines: lines)   // one pass; `records` (above) stays for status
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
                 let label = ProjectLabel.fromTranscript(lines: lines) ?? String(fullID.prefix(8))
                 found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
-                                      label: label, title: title, status: rolled, subDigests: digests,
-                                      steps: steps, tokens: tokens, startedAt: startedAt), mtime))
+                                      label: label, title: digest.title, status: rolled, subDigests: digests,
+                                      steps: digest.steps, tokens: digest.tokens, startedAt: digest.startedAt), mtime))
             }
         }
         return found

@@ -412,6 +412,36 @@ let legacyDecoded = try? JSONDecoder().decode(DaemonState.self, from: Data(legac
 check(legacyDecoded?.sessions.first?.sessionID == "old" && legacyDecoded?.sessions.first?.itermSessionID == nil,
       "legacy state.json (no identity keys) decodes with identity nil")
 
+// --- TranscriptDigest: ONE-PASS scan must be byte-identical to the individual functions ---
+let digestLines = [
+    #"{"type":"user","timestamp":"2026-06-17T16:11:38.253Z","message":{"content":"hi"}}"#,
+    #"{"type":"ai-title","aiTitle":"First"}"#,
+    #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9},"content":[{"type":"tool_use"},{"type":"text"}]}}"#,
+    "garbage{",
+    #"{"type":"ai-title","aiTitle":"Refined title"}"#,
+    #"{"type":"assistant","usage":{"input_tokens":10,"output_tokens":5},"message":{"content":[{"type":"tool_use"}]}}"#,
+    #"{"type":"ai-title","aiTitle":"   "}"#,
+    #"{"type":"assistant","message":{"content":[{"type":"text"}]}}"#,
+]
+let scanned = TranscriptDigest.scan(lines: digestLines)
+check(scanned.tokens == TokenUsage.freshTokens(lines: digestLines), "scan.tokens == freshTokens (byte-identical)")
+check(scanned.title == ConversationTitle.fromTranscript(lines: digestLines), "scan.title == fromTranscript")
+check(scanned.startedAt == TranscriptClock.startedAt(lines: digestLines), "scan.startedAt == startedAt")
+let digestSteps = TranscriptAdapter.parse(lines: digestLines).reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
+check(scanned.steps == digestSteps, "scan.steps == TranscriptAdapter tool_use count")
+check(scanned.tokens == 165, "scan: tokens 165 (100+50 + 10+5, cache excluded)")
+check(scanned.title == "Refined title", "scan: last non-empty ai-title wins")
+check(scanned.startedAt != nil, "scan: startedAt = first timestamp")
+check(scanned.steps == 2, "scan: 2 tool_use steps")
+check(TranscriptDigest.scan(lines: []) == TranscriptDigest.Result(tokens: 0, title: nil, startedAt: nil, steps: 0),
+      "scan: empty -> zeros")
+check(TranscriptDigest.scan(lines: usageLines).tokens == TokenUsage.freshTokens(lines: usageLines),
+      "scan.tokens matches freshTokens on the usage fixture")
+check(TranscriptDigest.scan(lines: titleLines).title == ConversationTitle.fromTranscript(lines: titleLines),
+      "scan.title matches fromTranscript on the title fixture")
+check(TranscriptDigest.scan(lines: tsLines).startedAt == TranscriptClock.startedAt(lines: tsLines),
+      "scan.startedAt matches startedAt on the timestamp fixture")
+
 print("")
 if failures == 0 {
     print("ALL PASS — \(total) checks")
