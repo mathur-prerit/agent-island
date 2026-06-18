@@ -19,6 +19,18 @@ final class AppController: NSObject {
     private var islandEnabled = true
     private var dismissedFinished: Set<String> = []   // finished sessions the user removed from view
     private var lastStatus: [String: AgentStatus] = [:]   // prev status per session, for sound-cue transitions
+    private let dismissedKey = "islandDismissedFinished"   // UserDefaults: persisted dismissedFinished ids
+
+    // "Keep Mac awake": while ON and a session is working, hold an idle-system-sleep assertion so a
+    // long agent run isn't suspended when you step away. (Won't keep the Mac awake with the lid
+    // closed on battery — clamshell sleep is a separate mechanism.)
+    private var sleepToken: NSObjectProtocol?
+    private let keepAwakeKey = "islandKeepAwake"   // UserDefaults bool; default off
+
+    // Click-to-focus: the owning terminal's window identity per session (keyed by fullID), captured
+    // at SessionStart by the hook and carried in the daemon snapshot. Empty in polling mode.
+    private struct WindowIdentity { let termProgram: String?; let itermSessionID: String?; let bundleID: String? }
+    private var windowIdentities: [String: WindowIdentity] = [:]
 
     private let fm = FileManager.default
     private let projectsDir = ("~/.claude/projects" as NSString).expandingTildeInPath
@@ -37,7 +49,9 @@ final class AppController: NSObject {
         statusItem.button?.title = "○"
         menu.autoenablesItems = false
         statusItem.menu = menu
+        dismissedFinished = Set(UserDefaults.standard.stringArray(forKey: dismissedKey) ?? [])
         island.onDismiss = { [weak self] id in self?.dismissFinished(id) }
+        island.onFocus = { [weak self] id in self?.focusWindow(id) }
         refresh()
         // Create the timer UNSCHEDULED and register it only in .common mode.
         // `Timer.scheduledTimer` already registers the timer in .default mode; adding
@@ -58,6 +72,7 @@ final class AppController: NSObject {
         // present AND still finished, so a session that resumes work (or a brand-new one) reappears.
         let finishedIDs = Set(sessions.filter { isFinished($0.status) }.map { $0.fullID })
         dismissedFinished.formIntersection(finishedIDs)
+        persistDismissed()   // prune-then-persist so the stored set never accumulates stale ids
         sessions = sessions.filter { !dismissedFinished.contains($0.fullID) }
 
         detectTransitions(in: sessions)
@@ -91,11 +106,31 @@ final class AppController: NSObject {
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
 
-        // Quiet by default: themes opt into lifecycle sound cues (today only Road Runner's arcade set).
+        // Quiet by default: themes opt into lifecycle sound cues (today only Road Runner's arcade set);
+        // the neutral default set fills in for silent themes (or replaces the theme set entirely).
         let soundToggle = NSMenuItem(title: "Sound cues", action: #selector(toggleSound), keyEquivalent: "")
         soundToggle.target = self; soundToggle.isEnabled = true
         soundToggle.state = SoundManager.shared.isEnabled ? .on : .off
         menu.addItem(soundToggle)
+
+        let soundSetItem = NSMenuItem(title: "Sound set", action: nil, keyEquivalent: "")
+        let soundSetMenu = NSMenu()
+        let activeSet = currentSoundSet
+        for (id, label) in [("theme", "Theme set"), ("default", "Default set")] {
+            let si = NSMenuItem(title: label, action: #selector(pickSoundSet(_:)), keyEquivalent: "")
+            si.target = self; si.representedObject = id; si.state = (id == activeSet) ? .on : .off
+            si.isEnabled = true   // always pickable; the choice just takes effect once cues are on
+            soundSetMenu.addItem(si)
+        }
+        soundSetItem.submenu = soundSetMenu
+        menu.addItem(soundSetItem)
+
+        // Opt-in: prevent OS idle system-sleep while an agent is working (good battery citizen —
+        // only asserts when ON and something is actually working; see updateSleepAssertion).
+        let keepAwakeToggle = NSMenuItem(title: "Keep Mac awake", action: #selector(toggleKeepAwake), keyEquivalent: "")
+        keepAwakeToggle.target = self; keepAwakeToggle.isEnabled = true
+        keepAwakeToggle.state = UserDefaults.standard.bool(forKey: keepAwakeKey) ? .on : .off
+        menu.addItem(keepAwakeToggle)
 
         menu.addItem(.separator())
         let clear = NSMenuItem(title: "Clear finished sessions", action: #selector(clearFinished), keyEquivalent: "")
@@ -113,6 +148,7 @@ final class AppController: NSObject {
 
         let waiting = sessions.filter { isWaiting($0.status) }.count
         let working = sessions.contains { $0.status == .working }
+        updateSleepAssertion(on: UserDefaults.standard.bool(forKey: keepAwakeKey), working: working)
         let glyph: String
         let glyphColor: NSColor
         if waiting > 0 { glyph = "● \(waiting)"; glyphColor = .systemRed }
@@ -133,6 +169,20 @@ final class AppController: NSObject {
             } else {
                 button.layer?.removeAnimation(forKey: "menu-pulse")
             }
+        }
+
+        // Tooltip surfaces WHICH session needs you: the highest-priority waiting session's title +
+        // runtime (the glyph above stays a compact count). Quiet default when nothing's waiting.
+        if let top = sessions.filter({ isWaiting($0.status) })
+            .min(by: { DisplayPriority.rank($0.status) < DisplayPriority.rank($1.status) }) {
+            let name = TaskLineSanitizer.sanitize(top.title ?? top.label, maxLength: 28)
+            let elapsed = top.startedAt.map { TranscriptClock.elapsedLabel(from: $0, to: Date()) }
+            statusItem.button?.toolTip = elapsed.map { "\(name) · \($0)" } ?? name
+        } else if working {
+            let n = sessions.filter { $0.status == .working }.count
+            statusItem.button?.toolTip = (n == 1) ? "1 agent working" : "\(n) agents working"
+        } else {
+            statusItem.button?.toolTip = "agent-island"
         }
 
         if islandEnabled {
@@ -194,15 +244,22 @@ final class AppController: NSObject {
         return item
     }
 
-    @objc private func quit() { NSApplication.shared.terminate(nil) }
+    @objc private func quit() {
+        if let token = sleepToken { ProcessInfo.processInfo.endActivity(token); sleepToken = nil }
+        NSApplication.shared.terminate(nil)
+    }
     @objc private func toggleIsland() { islandEnabled.toggle(); refresh() }
 
     // Remove a single finished session from view (its ✕), or all finished at once (menu).
-    private func dismissFinished(_ id: String) { dismissedFinished.insert(id); refresh() }
+    private func dismissFinished(_ id: String) { dismissedFinished.insert(id); persistDismissed(); refresh() }
     @objc private func clearFinished() {
         dismissedFinished.formUnion(activeSessions().filter { isFinished($0.status) }.map { $0.fullID })
+        persistDismissed()
         refresh()
     }
+
+    /// Persist the dismissed-finished set so removals survive relaunch (re-pruned each refresh()).
+    private func persistDismissed() { UserDefaults.standard.set(Array(dismissedFinished), forKey: dismissedKey) }
     @objc private func resetIslandPosition() { island.resetPosition() }
 
     @objc private func pickTheme(_ sender: NSMenuItem) {
@@ -219,10 +276,42 @@ final class AppController: NSObject {
         refresh()
     }
 
+    @objc private func pickSoundSet(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(id, forKey: AppController.soundSetKey)
+        refresh()
+    }
+
+    @objc private func toggleKeepAwake() {
+        UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: keepAwakeKey), forKey: keepAwakeKey)
+        refresh()
+    }
+
+    /// Hold an idle-system-sleep assertion only while the toggle is ON and a session is working;
+    /// release it otherwise. Held strongly for its whole lifetime (dropping it lets the Mac sleep).
+    private func updateSleepAssertion(on: Bool, working: Bool) {
+        if on && working {
+            if sleepToken == nil {
+                sleepToken = ProcessInfo.processInfo.beginActivity(
+                    options: [.idleSystemSleepDisabled],
+                    reason: "agent-island: agent session running")
+            }
+        } else if let token = sleepToken {
+            ProcessInfo.processInfo.endActivity(token)
+            sleepToken = nil
+        }
+    }
+
     // MARK: - Sound cues (theme-owned lifecycle jingles)
 
     /// The theme the user has selected — the source of any transition sounds.
     private var currentTheme: IslandTheme { Themes.named(UserDefaults.standard.string(forKey: "islandTheme")) }
+
+    static let soundSetKey = "soundCueSet"   // UserDefaults; "theme" (default) | "default"
+
+    /// Which cue set plays: the selected theme's jingles ("theme", filling silence with the neutral
+    /// set) or always the neutral default set ("default"). Absent → "theme".
+    private var currentSoundSet: String { UserDefaults.standard.string(forKey: AppController.soundSetKey) ?? "theme" }
 
     /// Diff each visible session's status+tokens against the previous refresh and play the current
     /// theme's clip for any sound-worthy transition. Prunes ids no longer present so a resumed
@@ -231,9 +320,15 @@ final class AppController: NSObject {
     private func detectTransitions(in sessions: [Session]) {
         let present = Set(sessions.map(\.fullID))
         let theme = currentTheme
+        let useDefaultSet = (currentSoundSet == "default")
         for s in sessions {
             if let transition = TransitionDetector.transition(from: lastStatus[s.fullID], to: s.status) {
-                SoundManager.shared.play(theme.sound(for: transition))
+                // "default" set always plays the neutral cues; "theme" set prefers the theme's own
+                // jingle and falls back to the neutral cue so silent themes (Minimal) still cue.
+                let url = useDefaultSet
+                    ? DefaultSounds.url(for: transition)
+                    : (theme.sound(for: transition) ?? DefaultSounds.url(for: transition))
+                SoundManager.shared.play(url)
             }
             lastStatus[s.fullID] = s.status
         }
@@ -294,7 +389,11 @@ final class AppController: NSObject {
 
     // MARK: - Sessions (daemon state if running, else poll transcripts)
 
-    private func activeSessions() -> [Session] { daemonSessions() ?? polledSessions() }
+    private func activeSessions() -> [Session] {
+        if let d = daemonSessions() { return d }
+        windowIdentities = [:]   // polling mode has no window identity → click-to-focus no-ops
+        return polledSessions()
+    }
 
     private func daemonSessions() -> [Session]? {
         let statePath = ("~/.agent-island/state.json" as NSString).expandingTildeInPath
@@ -307,15 +406,22 @@ final class AppController: NSObject {
               Date().timeIntervalSince(mtime) < 30,
               let data = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
               let state = try? JSONDecoder().decode(DaemonState.self, from: data) else { return nil }
+        // Capture each session's window identity (for click-to-focus); set at SessionStart by the
+        // hook and persisted on the snapshot. Only daemon mode has it — polling clears the map.
+        windowIdentities = [:]
+        for snap in state.sessions
+        where snap.termProgram != nil || snap.itermSessionID != nil || snap.termBundleID != nil {
+            windowIdentities[snap.sessionID] = WindowIdentity(termProgram: snap.termProgram,
+                                                              itermSessionID: snap.itermSessionID,
+                                                              bundleID: snap.termBundleID)
+        }
         return state.sessions.map { snap in
             let short = String(snap.sessionID.prefix(8))
             // The daemon tracks state only; everything transcript-derived (tokens, title, start
             // time, per-sub-agent detail) is computed app-side from the transcript, read once.
             let path = snap.cwd.map { transcriptPath(cwd: $0, sessionID: snap.sessionID) }
             let lines = path.map { readLines($0) } ?? []
-            let tokens = TokenUsage.freshTokens(lines: lines)
-            let title = ConversationTitle.fromTranscript(lines: lines)
-            let startedAt = TranscriptClock.startedAt(lines: lines)
+            let digest = TranscriptDigest.scan(lines: lines)   // one pass: tokens/title/startedAt/steps
             var digests = path.map { subagentDigests(forTranscript: $0) } ?? []
             // If the sub-agent transcripts aren't on disk yet, fall back to the daemon's
             // running/done counts as nameless placeholders so the tally still shows.
@@ -324,8 +430,8 @@ final class AppController: NSObject {
                     + Array(repeating: SubagentDigest(name: "sub-agent", status: .finished(.success), tokens: 0, durationSeconds: nil), count: snap.subDone)
             }
             return Session(fullID: snap.sessionID, shortID: short, label: snap.label ?? short,
-                           title: title, status: AgentStatus(stateToken: snap.state),
-                           subDigests: digests, steps: 0, tokens: tokens, startedAt: startedAt)
+                           title: digest.title, status: AgentStatus(stateToken: snap.state),
+                           subDigests: digests, steps: 0, tokens: digest.tokens, startedAt: digest.startedAt)
         }
     }
 
@@ -359,15 +465,12 @@ final class AppController: NSObject {
                 if case .waitingForInput = rolled, Date().timeIntervalSince(mtime) > 600 {
                     rolled = .finished(.success)
                 }
-                let steps = records.reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
-                let tokens = TokenUsage.freshTokens(lines: lines)
-                let title = ConversationTitle.fromTranscript(lines: lines)
-                let startedAt = TranscriptClock.startedAt(lines: lines)
+                let digest = TranscriptDigest.scan(lines: lines)   // one pass; `records` (above) stays for status
                 let fullID = ((p as NSString).lastPathComponent as NSString).deletingPathExtension
                 let label = ProjectLabel.fromTranscript(lines: lines) ?? String(fullID.prefix(8))
                 found.append((Session(fullID: fullID, shortID: String(fullID.prefix(8)),
-                                      label: label, title: title, status: rolled, subDigests: digests,
-                                      steps: steps, tokens: tokens, startedAt: startedAt), mtime))
+                                      label: label, title: digest.title, status: rolled, subDigests: digests,
+                                      steps: digest.steps, tokens: digest.tokens, startedAt: digest.startedAt), mtime))
             }
         }
         return found
@@ -414,6 +517,46 @@ final class AppController: NSObject {
     }
     private func verdict(_ s: AgentStatus) -> Verdict? {
         if case .finished(let v) = s { return v } else { return nil }
+    }
+
+    // MARK: - Click-to-focus (raise the owning terminal window)
+
+    /// Raise the terminal window/tab that owns this session. Identity is captured at SessionStart
+    /// (daemon mode only); polling-mode or unknown-host rows have no identity and no-op gracefully.
+    private func focusWindow(_ id: String) {
+        guard let ident = windowIdentities[id] else { return }
+        if ident.termProgram == "iTerm.app", let guid = itermGUID(from: ident.itermSessionID) {
+            focusITerm2(guid: guid)
+        } else if let bundle = ident.bundleID,
+                  let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first {
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
+    }
+
+    /// Select + activate an iTerm2 session by its GUID via AppleScript. First use prompts for
+    /// Automation (TCC) permission. Runs off the main thread; errors are swallowed (best-effort).
+    private func focusITerm2(guid: String) {
+        let script = """
+        tell application "iTerm2"
+          repeat with w in windows
+            repeat with t in tabs of w
+              repeat with s in sessions of t
+                if (id of s) is "\(guid)" then
+                  select w
+                  select t
+                  select s
+                  activate
+                  return
+                end if
+              end repeat
+            end repeat
+          end repeat
+        end tell
+        """
+        DispatchQueue.global(qos: .userInitiated).async {
+            var err: NSDictionary?
+            NSAppleScript(source: script)?.executeAndReturnError(&err)
+        }
     }
 
 }

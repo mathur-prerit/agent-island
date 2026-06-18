@@ -274,6 +274,20 @@ check(TransitionDetector.transition(from: .working, to: .finished(.failed)) == .
       "transition: -> finished(failed) fires game over")
 check(TransitionDetector.transition(from: .finished(.success), to: .finished(.success)) == nil,
       "transition: already finished does not re-fire")
+// default (non-theme) cue set: pure transition -> clip-name mapping (App resolves names to WAVs)
+check(DefaultSoundSet.clipName(for: .startedWorking) == "started",
+      "default set: startedWorking -> started")
+check(DefaultSoundSet.clipName(for: .enteredWaiting(.stoppedTurn)) == "waiting",
+      "default set: enteredWaiting(stopped) -> waiting")
+check(DefaultSoundSet.clipName(for: .enteredWaiting(.permission)) == "waiting",
+      "default set: enteredWaiting(permission) -> waiting (same neutral cue)")
+check(DefaultSoundSet.clipName(for: .enteredFinished(.success)) == "finished_ok",
+      "default set: finished(success) -> finished_ok")
+check(DefaultSoundSet.clipName(for: .enteredFinished(.failed)) == "finished_fail",
+      "default set: finished(failed) -> finished_fail")
+check(DefaultSoundSet.clipName(for: .enteredFinished(.unknown)) == nil,
+      "default set: finished(unknown) -> nil (silent, matching the theme)")
+
 let throttleBase = Date(timeIntervalSince1970: 1_700_000_000)
 check(PlayThrottle.allows(now: throttleBase, last: .distantPast, cooldown: 1.0), "throttle: first play allowed")
 check(!PlayThrottle.allows(now: throttleBase.addingTimeInterval(0.5), last: throttleBase, cooldown: 1.0), "throttle: within cooldown blocked")
@@ -356,6 +370,77 @@ check(dig.name.count == 38 && dig.name.hasPrefix("Survey the Swift package") && 
 check(dig.tokens == 2769, "subagent digest: tokens summed (input+output)")
 check(dig.status == .waitingForInput(.stoppedTurn), "subagent digest: status derived from records")
 check(dig.durationSeconds.map { Int($0) } == 48, "subagent digest: duration = last-first = 48s")
+
+// --- Theme scene state mapping (RowStateMapper mirrors the old cue() precedence exactly) ---
+check(RowStateMapper.stateKey(isIdleRow: true, spinning: true, waitReason: .permission, verdict: .failed, dimmed: true) == .idle,
+      "stateKey: idle row wins over everything")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: true, waitReason: .permission, verdict: .failed, dimmed: true) == .working,
+      "stateKey: spinning -> working (outranks waiting/failed/finished)")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: .permission, verdict: .failed, dimmed: true) == .waiting(.permission),
+      "stateKey: waiting(permission) outranks failed/finished")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: .stoppedTurn, verdict: nil, dimmed: false) == .waiting(.stoppedTurn),
+      "stateKey: waiting(stoppedTurn)")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: .failed, dimmed: true) == .failed,
+      "stateKey: failed verdict outranks finished/dimmed")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: .success, dimmed: true) == .finished,
+      "stateKey: dimmed + success -> finished")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: nil, dimmed: true) == .finished,
+      "stateKey: dimmed (no verdict) -> finished")
+check(RowStateMapper.stateKey(isIdleRow: false, spinning: false, waitReason: nil, verdict: nil, dimmed: false) == .idle,
+      "stateKey: no signal -> idle fallback")
+check(RowSnapshot(id: "a", tokens: 5, state: .working) == RowSnapshot(id: "a", tokens: 5, state: .working),
+      "RowSnapshot is Equatable")
+
+// --- Click-to-focus: iTerm2 GUID extraction + window-identity persistence ---
+check(itermGUID(from: "w2t0p0:E6101BA4-C887-4433-9901-DD2126E04CC7") == "E6101BA4-C887-4433-9901-DD2126E04CC7",
+      "itermGUID: extracts GUID after the colon")
+check(itermGUID(from: "no-colon") == nil, "itermGUID: nil when no colon")
+check(itermGUID(from: "trailing:") == nil, "itermGUID: nil on empty suffix")
+check(itermGUID(from: nil) == nil, "itermGUID: nil input -> nil")
+let focusStore = StateStore()
+let focusT0 = Date(timeIntervalSince1970: 1_700_000_000)
+focusStore.apply(eventType: "SessionStart", sessionID: "S1", cwd: "/x/proj",
+                 termProgram: "iTerm.app", itermSessionID: "w0t0p0:GUID1", termBundleID: "com.googlecode.iterm2", at: focusT0)
+let fSnap1 = focusStore.snapshot(now: focusT0).sessions.first { $0.sessionID == "S1" }
+check(fSnap1?.itermSessionID == "w0t0p0:GUID1" && fSnap1?.termProgram == "iTerm.app",
+      "store: SessionStart persists window identity")
+focusStore.apply(eventType: "Stop", sessionID: "S1", at: focusT0.addingTimeInterval(1))
+let fSnap2 = focusStore.snapshot(now: focusT0.addingTimeInterval(1)).sessions.first { $0.sessionID == "S1" }
+check(fSnap2?.itermSessionID == "w0t0p0:GUID1", "store: identity-less event keeps prior identity")
+let legacyJSON = #"{"sessions":[{"sessionID":"old","state":"working","subActive":0,"subDone":0}]}"#
+let legacyDecoded = try? JSONDecoder().decode(DaemonState.self, from: Data(legacyJSON.utf8))
+check(legacyDecoded?.sessions.first?.sessionID == "old" && legacyDecoded?.sessions.first?.itermSessionID == nil,
+      "legacy state.json (no identity keys) decodes with identity nil")
+
+// --- TranscriptDigest: ONE-PASS scan must be byte-identical to the individual functions ---
+let digestLines = [
+    #"{"type":"user","timestamp":"2026-06-17T16:11:38.253Z","message":{"content":"hi"}}"#,
+    #"{"type":"ai-title","aiTitle":"First"}"#,
+    #"{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9},"content":[{"type":"tool_use"},{"type":"text"}]}}"#,
+    "garbage{",
+    #"{"type":"ai-title","aiTitle":"Refined title"}"#,
+    #"{"type":"assistant","usage":{"input_tokens":10,"output_tokens":5},"message":{"content":[{"type":"tool_use"}]}}"#,
+    #"{"type":"ai-title","aiTitle":"   "}"#,
+    #"{"type":"assistant","message":{"content":[{"type":"text"}]}}"#,
+]
+let scanned = TranscriptDigest.scan(lines: digestLines)
+check(scanned.tokens == TokenUsage.freshTokens(lines: digestLines), "scan.tokens == freshTokens (byte-identical)")
+check(scanned.title == ConversationTitle.fromTranscript(lines: digestLines), "scan.title == fromTranscript")
+check(scanned.startedAt == TranscriptClock.startedAt(lines: digestLines), "scan.startedAt == startedAt")
+let digestSteps = TranscriptAdapter.parse(lines: digestLines).reduce(0) { $0 + $1.assistantBlockKinds.filter { $0 == "tool_use" }.count }
+check(scanned.steps == digestSteps, "scan.steps == TranscriptAdapter tool_use count")
+check(scanned.tokens == 165, "scan: tokens 165 (100+50 + 10+5, cache excluded)")
+check(scanned.title == "Refined title", "scan: last non-empty ai-title wins")
+check(scanned.startedAt != nil, "scan: startedAt = first timestamp")
+check(scanned.steps == 2, "scan: 2 tool_use steps")
+check(TranscriptDigest.scan(lines: []) == TranscriptDigest.Result(tokens: 0, title: nil, startedAt: nil, steps: 0),
+      "scan: empty -> zeros")
+check(TranscriptDigest.scan(lines: usageLines).tokens == TokenUsage.freshTokens(lines: usageLines),
+      "scan.tokens matches freshTokens on the usage fixture")
+check(TranscriptDigest.scan(lines: titleLines).title == ConversationTitle.fromTranscript(lines: titleLines),
+      "scan.title matches fromTranscript on the title fixture")
+check(TranscriptDigest.scan(lines: tsLines).startedAt == TranscriptClock.startedAt(lines: tsLines),
+      "scan.startedAt matches startedAt on the timestamp fixture")
 
 print("")
 if failures == 0 {

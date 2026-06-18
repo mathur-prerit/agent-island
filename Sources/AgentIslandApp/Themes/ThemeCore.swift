@@ -2,16 +2,26 @@ import AppKit
 import Foundation
 import AgentIslandCore
 
-// Theme system core: the rendering contract every theme speaks (`Cue`), the `IslandTheme`
+// Theme system core: the rendering contract every theme speaks (`ThemeScene`), the `IslandTheme`
 // protocol, the `Themes` registry, and the shared per-state background tint. Concrete themes
 // live one-per-file alongside this (`JourneyTheme.swift`, `MinimalTheme.swift`).
 
-/// What a row's status indicator renders as. A theme returns one of these per frame; the row view
-/// shows a monospace label, a (tintable) icon, or the scrolling road scene accordingly.
-enum Cue {
-    case text(String, NSColor)              // monospace label (Minimal theme + fallbacks)
-    case icon(NSImage, tint: NSColor?)      // an SF Symbol (tinted) or a hand-drawn image (tint == nil)
-    case road(tokens: Int, mode: RoadMode)  // the road-trip theme's journey scene (driving or stopped)
+/// A theme's live status indicator for one row. The theme owns the AppKit view(s) and all the
+/// state→visual logic; the row view just hands it a `RowSnapshot`, asks where to place it
+/// (inline beside the title vs. a wide banner on its own row), and advances its animation frame.
+/// One scene instance per row, re-created when the theme changes.
+protocol ThemeScene: AnyObject {
+    /// The view to place — whichever sub-view is active for the current snapshot (or a container).
+    var view: NSView { get }
+    /// Where to place `view` for the CURRENT snapshot. Read AFTER `apply(_:)`; state-dependent
+    /// (e.g. the road wants its own banner row, an inline icon/label does not).
+    var prefersOwnRow: Bool { get }
+    /// Set the static, frame-independent state (tokens, which sub-view to show, colours).
+    func apply(_ snapshot: RowSnapshot)
+    /// Advance the animation to `frame` (lane dashes, spinner glyph, signal cycle…).
+    func tick(_ frame: Int)
+    /// Does this state animate, so the shared ticker needs to run?
+    func animates(_ snapshot: RowSnapshot) -> Bool
 }
 
 /// How the road scene plays: the vehicle is either driving (world scrolls) or halted at an
@@ -35,10 +45,9 @@ protocol IslandTheme {
     var id: String { get }
     var displayName: String { get }
     var showsPersonaGlyph: Bool { get }
-    /// Does this row's cue animate (so the shared ticker needs to run)?
-    func animates(_ row: IslandPanel.Row) -> Bool
-    /// The indicator for a row at tick `frame`.
-    func cue(for row: IslandPanel.Row, frame: Int) -> Cue
+    /// Make a fresh status-indicator scene for one row. The scene owns its view(s) and renders
+    /// every state itself; the row drives it via `apply`/`tick`.
+    func makeScene() -> ThemeScene
     /// Row background tint base color (`.clear` = no tint).
     func tint(for row: IslandPanel.Row) -> NSColor
     /// The sound clip to play for a lifecycle transition (a theme jingle), or `nil` for silence.

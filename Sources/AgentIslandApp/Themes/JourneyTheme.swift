@@ -17,19 +17,7 @@ struct JourneyTheme: IslandTheme {
     let displayName = "Road Runner"
     let showsPersonaGlyph = false   // the road scene is the indicator
 
-    func animates(_ row: IslandPanel.Row) -> Bool { row.spinning || row.waitReason != nil }
-
-    func cue(for row: IslandPanel.Row, frame: Int) -> Cue {
-        if row.id == "idle" { return .icon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor) }
-        if row.spinning { return .road(tokens: row.tokens, mode: .driving) }
-        if let wait = row.waitReason {
-            let kind: RoadMode.StopKind = (wait == .permission) ? .permission : .turnEnd
-            return .road(tokens: row.tokens, mode: .stopped(kind))
-        }
-        if row.verdict == .failed { return .icon(IslandIcons.symbol("exclamationmark.triangle.fill"), tint: .systemRed) }
-        if row.dimmed { return .icon(IslandIcons.symbol("flag.checkered"), tint: .systemGreen) }
-        return .icon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor)
-    }
+    func makeScene() -> ThemeScene { JourneyScene() }
 
     func tint(for row: IslandPanel.Row) -> NSColor { stateTint(row) }
 
@@ -50,5 +38,76 @@ struct JourneyTheme: IslandTheme {
         Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "RoadRunner")
             ?? Bundle.module.url(forResource: name, withExtension: "wav", subdirectory: "Themes/RoadRunner")
             ?? Bundle.module.url(forResource: name, withExtension: "wav")
+    }
+}
+
+// MARK: - Journey scene
+
+/// The Road Runner indicator. Holds both sub-views and shows exactly one per state:
+/// - working/waiting → the wide scrolling `RoadSceneView` (driving, or stopped at a signal),
+///   which `prefersOwnRow` so it sits on its own banner row above the title;
+/// - failed/finished/idle → a small tintable SF Symbol (warning / checkered flag / parking sign)
+///   shown inline beside the title.
+/// `view` returns whichever sub-view is active, so the row places only the live indicator (the
+/// road banner vs. the inline icon) exactly as the old `cueRoad`/`cueImage` split did.
+final class JourneyScene: ThemeScene {
+    private let road = RoadSceneView()
+    private let icon = NSImageView()
+    private var roadActive = false
+
+    init() {
+        // The road scene is a wide banner — give it room so the vehicle, milestone signs and
+        // signal all read distinctly (same fixed 290×26 the old cueRoad carried in the row).
+        road.isHidden = true
+        NSLayoutConstraint.activate([
+            road.widthAnchor.constraint(equalToConstant: 290),
+            road.heightAnchor.constraint(equalToConstant: 26),
+        ])
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.isHidden = true
+    }
+
+    /// The active sub-view (road banner while working/waiting; inline icon otherwise).
+    var view: NSView { roadActive ? road : icon }
+    /// Only the road wants its own banner row; the inline icon sits beside the title.
+    var prefersOwnRow: Bool { roadActive }
+
+    func apply(_ snapshot: RowSnapshot) {
+        switch snapshot.state {
+        case .working:
+            road.tokens = snapshot.tokens
+            road.mode = .driving
+            roadActive = true
+        case let .waiting(reason):
+            road.tokens = snapshot.tokens
+            road.mode = .stopped(reason == .permission ? .permission : .turnEnd)
+            roadActive = true
+        case .failed:
+            setIcon(IslandIcons.symbol("exclamationmark.triangle.fill"), tint: .systemRed)
+        case .finished:
+            setIcon(IslandIcons.symbol("flag.checkered"), tint: .systemGreen)
+        case .idle:
+            setIcon(IslandIcons.symbol("parkingsign"), tint: .secondaryLabelColor)
+        }
+        // Keep the inactive sub-view hidden so a stale frame can't flash through during a swap.
+        road.isHidden = !roadActive
+        icon.isHidden = roadActive
+    }
+
+    func tick(_ frame: Int) { road.frame_ = frame }
+
+    func animates(_ snapshot: RowSnapshot) -> Bool {
+        switch snapshot.state {
+        case .working, .waiting: return true
+        case .idle, .failed, .finished: return false
+        }
+    }
+
+    private func setIcon(_ image: NSImage, tint: NSColor?) {
+        icon.image = image
+        icon.contentTintColor = tint   // nil → the image draws with its own colours
+        roadActive = false
     }
 }

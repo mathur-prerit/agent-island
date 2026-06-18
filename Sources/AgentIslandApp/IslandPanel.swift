@@ -45,6 +45,8 @@ final class IslandPanel: NSPanel {
 
     /// Called when the user dismisses a finished row (via its ✕). Wired to the app's dismiss set.
     var onDismiss: ((String) -> Void)?
+    /// Called when the user clicks a row's background/title — raise the owning terminal window.
+    var onFocus: ((String) -> Void)?
 
     struct SubRow {
         let glyph: String; let color: NSColor; let text: String
@@ -178,6 +180,7 @@ final class IslandPanel: NSPanel {
                 v.theme = theme
                 v.onToggle = { [weak self] in self?.resizeAndReposition() }
                 v.onDismiss = { [weak self] id in self?.onDismiss?(id) }
+                v.onFocus = { [weak self] id in self?.onFocus?(id) }
                 rowViews[row.id] = v
                 return v
             }()
@@ -303,11 +306,12 @@ extension IslandPanel: NSWindowDelegate {
 /// expand state survives. Carries a per-state background tint + a monospace status indicator.
 final class SessionRowView: NSView {
     private let line = NSStackView()
-    // The status cue renders as exactly one of these (the others hidden): a monospace label
-    // (Minimal CLI cues), a tintable icon (SF Symbol / traffic light), or the scrolling road scene.
-    private let cueText = NSTextField(labelWithString: "")
-    private let cueImage = NSImageView()
-    private let cueRoad = RoadSceneView()
+    // The status indicator is a theme-owned scene placed in one of two slots: an inline slot beside
+    // the title (CLI label / SF-Symbol icon) or a wide banner slot on its own row (the road scene).
+    // The scene owns all state→visual logic; this view just hands it a snapshot + animation frame.
+    private let inlineSlot = NSView()
+    private let bannerSlot = NSView()
+    private var scene: ThemeScene = JourneyTheme().makeScene()
     private let glyph = NSTextField(labelWithString: "")        // persona emoji
     private let titleLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
@@ -317,11 +321,12 @@ final class SessionRowView: NSView {
     private let closeButton = FirstMouseButton(title: "✕", target: nil, action: nil)  // dismiss a finished row
     private var expanded = false
     private var currentRow: IslandPanel.Row?
-    var theme: IslandTheme = JourneyTheme()
+    var theme: IslandTheme = JourneyTheme() { didSet { rebuildScene() } }
 
     var onToggle: (() -> Void)?
     var onDismiss: ((String) -> Void)?
-    var isAnimating: Bool { currentRow.map { theme.animates($0) } ?? false }
+    var onFocus: ((String) -> Void)?
+    var isAnimating: Bool { currentRow.map { scene.animates(snapshot(for: $0)) } ?? false }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -334,20 +339,14 @@ final class SessionRowView: NSView {
         line.spacing = 8
         line.translatesAutoresizingMaskIntoConstraints = false
 
-        cueText.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
-        cueText.translatesAutoresizingMaskIntoConstraints = false
-        cueText.setContentHuggingPriority(.required, for: .horizontal)   // size to content
-        cueImage.translatesAutoresizingMaskIntoConstraints = false
-        cueImage.imageScaling = .scaleProportionallyUpOrDown
-        cueImage.setContentHuggingPriority(.required, for: .horizontal)
-        cueImage.isHidden = true
-        // The road scene is a wide banner shown on its own row above the title — give it room so the
-        // vehicle, milestone signs and signal all read distinctly (it's cramped beside the text).
-        cueRoad.isHidden = true
-        NSLayoutConstraint.activate([
-            cueRoad.widthAnchor.constraint(equalToConstant: 290),
-            cueRoad.heightAnchor.constraint(equalToConstant: 26),
-        ])
+        // Two slots host the active scene view: a small inline indicator beside the title, and a
+        // wide banner on its own row above it. The scene picks which via `prefersOwnRow`; the empty
+        // slot is hidden so NSStackView collapses it. The scene supplies its own size constraints.
+        for slot in [inlineSlot, bannerSlot] {
+            slot.translatesAutoresizingMaskIntoConstraints = false
+            slot.setContentHuggingPriority(.required, for: .horizontal)
+            slot.isHidden = true
+        }
 
         glyph.font = .systemFont(ofSize: 16)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -373,12 +372,10 @@ final class SessionRowView: NSView {
         closeButton.isHidden = true                  // only finished rows are dismissable
         closeButton.setContentHuggingPriority(.required, for: .horizontal)
 
-        // Small inline cues (CLI spinner/caret, idle/finished icons) sit beside the title; the wide
-        // road banner (cueRoad) lives on its own row above, added to `outer` below. The ✕ trails the
-        // cell so a finished row can be removed.
+        // The inline indicator slot sits beside the title; the wide banner slot lives on its own row
+        // above, added to `outer` below. The ✕ trails the cell so a finished row can be removed.
         line.addArrangedSubview(disclosure)
-        line.addArrangedSubview(cueText)
-        line.addArrangedSubview(cueImage)
+        line.addArrangedSubview(inlineSlot)
         line.addArrangedSubview(glyph)
         line.addArrangedSubview(cell)
         line.addArrangedSubview(closeButton)
@@ -389,7 +386,7 @@ final class SessionRowView: NSView {
         subStack.edgeInsets = NSEdgeInsets(top: 2, left: 28, bottom: 2, right: 0)
         subStack.isHidden = true
 
-        let outer = NSStackView(views: [cueRoad, line, subStack])
+        let outer = NSStackView(views: [bannerSlot, line, subStack])
         outer.orientation = .vertical
         outer.alignment = .leading
         outer.spacing = 4
@@ -454,31 +451,62 @@ final class SessionRowView: NSView {
         }
     }
 
-    /// Advance the cue one tick (called by the panel's shared ticker).
-    func tick(_ frame: Int) { renderIndicator(frame: frame) }
-
-    private func renderIndicator(frame: Int) {
-        guard let row = currentRow else { return }
-        let f = IslandAnimations.reduceMotion ? 0 : frame   // Reduce Motion → freeze on frame 0
-        switch theme.cue(for: row, frame: f) {
-        case let .text(s, color):
-            cueText.stringValue = s
-            cueText.textColor = color
-            show(cueText)
-        case let .icon(image, tint):
-            cueImage.image = image
-            cueImage.contentTintColor = tint   // nil → the image draws with its own colours
-            show(cueImage)
-        case let .road(tokens, mode):
-            cueRoad.tokens = tokens
-            cueRoad.mode = mode
-            cueRoad.frame_ = f
-            show(cueRoad)
-        }
+    /// Advance the scene one tick (called by the panel's shared ticker).
+    func tick(_ frame: Int) {
+        scene.tick(IslandAnimations.reduceMotion ? 0 : frame)   // Reduce Motion → freeze on frame 0
     }
 
-    /// Show exactly one of the three cue subviews; hide the rest (NSStackView drops hidden views).
-    private func show(_ view: NSView) {
-        for v in [cueText, cueImage, cueRoad] as [NSView] { v.isHidden = (v !== view) }
+    /// Project the row to an AppKit-free snapshot (the scene speaks `ThemeStateKey`, not `Row`).
+    private func snapshot(for row: IslandPanel.Row) -> RowSnapshot {
+        RowSnapshot(id: row.id, tokens: row.tokens,
+                    state: RowStateMapper.stateKey(isIdleRow: row.id == "idle", spinning: row.spinning,
+                                                   waitReason: row.waitReason, verdict: row.verdict,
+                                                   dimmed: row.dimmed))
+    }
+
+    /// Hand the scene the current snapshot, place its view in the banner vs. inline slot, then set
+    /// the animation frame (frozen at 0 under Reduce Motion).
+    private func renderIndicator(frame: Int) {
+        guard let row = currentRow else { return }
+        scene.apply(snapshot(for: row))
+        placeScene(prefersOwnRow: scene.prefersOwnRow)
+        scene.tick(IslandAnimations.reduceMotion ? 0 : frame)
+    }
+
+    /// Place the scene's active view in the banner slot (its own row) or the inline slot (beside the
+    /// title), hiding the empty one. Never removes an arranged subview — the slots are arranged once
+    /// in init and only their `isHidden` is toggled (avoids the macOS-26 removeArrangedSubview abort).
+    private func placeScene(prefersOwnRow: Bool) {
+        let target = prefersOwnRow ? bannerSlot : inlineSlot
+        let other  = prefersOwnRow ? inlineSlot : bannerSlot
+        let v = scene.view
+        if v.superview !== target {
+            v.removeFromSuperview()
+            v.translatesAutoresizingMaskIntoConstraints = false
+            target.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.topAnchor.constraint(equalTo: target.topAnchor),
+                v.leadingAnchor.constraint(equalTo: target.leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: target.trailingAnchor),
+                v.bottomAnchor.constraint(equalTo: target.bottomAnchor),
+            ])
+        }
+        target.isHidden = false
+        other.isHidden = true
+    }
+
+    /// Rebuild the scene when the theme changes; clear both slots so no stale sub-view lingers.
+    private func rebuildScene() {
+        inlineSlot.subviews.forEach { $0.removeFromSuperview() }
+        bannerSlot.subviews.forEach { $0.removeFromSuperview() }
+        scene = theme.makeScene()
+        if currentRow != nil { renderIndicator(frame: 0) }
+    }
+
+    /// Clicking the row's background/title raises the owning terminal window (click-to-focus). The
+    /// disclosure/✕ are `FirstMouseButton`s that consume their own clicks, so a `mouseDown` reaching
+    /// the row view is a background/title hit. We don't call super (no window drag from a row body).
+    override func mouseDown(with event: NSEvent) {
+        if let id = currentRow?.id { onFocus?(id) }
     }
 }

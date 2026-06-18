@@ -38,7 +38,7 @@ let package = Package(
             // structure verbatim so relative lookups resolve. The theme-spec doc is source-tree
             // docs, not a runtime resource — exclude it so SwiftPM doesn't warn/bundle it.
             exclude: ["Themes/README.md"],
-            resources: [.copy("Themes/RoadRunner")]),
+            resources: [.copy("Themes/RoadRunner"), .copy("Themes/Default")]),
         .executableTarget(name: "AgentIslandHookCLI", dependencies: ["HookInstall", "AgentIslandDaemon"]),
         .executableTarget(name: "agentislandd", dependencies: ["AgentIslandDaemon", "AgentIslandCore"]),
     ]
