@@ -127,15 +127,27 @@ final class ManifestScene: ThemeScene {
     }
 
     func animates(_ snapshot: RowSnapshot) -> Bool {
-        if case .sprite(_, _, _, let frameCount, _) = visual(for: snapshot.state) { return frameCount > 1 }
+        if case .sprite(_, _, _, let frameCount, _) = visual(for: snapshot.state, tokens: snapshot.tokens) {
+            return frameCount > 1
+        }
         return false
     }
 
-    /// The visual for the CURRENT snapshot (nil when the manifest omits this state).
-    private var currentVisual: Visual? { visual(for: snapshot.state) }
+    /// The visual for the CURRENT snapshot (nil when the manifest omits this state). Token-band aware:
+    /// when the state declares `visualBands`, the live token count selects the band and its visual.
+    private var currentVisual: Visual? { visual(for: snapshot.state, tokens: snapshot.tokens) }
 
-    private func visual(for state: ThemeStateKey) -> Visual? {
-        manifest.states[ManifestStateMap.id(for: state)]?.visual
+    /// Resolve the visual for a state at a given token count: a per-band override when the state has
+    /// `visualBands` and the current band supplies one, else the state's base `visual`. A theme with no
+    /// `tokenBands` (or a state with no `visualBands`) always lands on the base visual — unchanged.
+    private func visual(for state: ThemeStateKey, tokens: Int) -> Visual? {
+        guard let spec = manifest.states[ManifestStateMap.id(for: state)] else { return nil }
+        if !spec.visualBands.isEmpty,
+           let band = TokenBands.bandName(for: tokens, bands: manifest.tokenBands),
+           let banded = spec.visualBands[band] {
+            return banded
+        }
+        return spec.visual
     }
 
     private func render(frame: Int) {

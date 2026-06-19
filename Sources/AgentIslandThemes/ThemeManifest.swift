@@ -22,10 +22,11 @@ public struct ThemeManifest: Equatable, Sendable {
     public let tint: [String: String]           // canonical state id → colour-ref string (row background)
     public let states: [String: StateSpec]      // canonical state id → what to render (+ optional sound)
     public let layout: Layout?
+    public let tokenBands: [TokenBand]           // optional usage tiers (empty = no banding); ascending
 
     public init(schemaVersion: Int, id: String, displayName: String, minAppVersion: String?,
                 showsPersonaGlyph: Bool, palette: [String: String], tint: [String: String],
-                states: [String: StateSpec], layout: Layout?) {
+                states: [String: StateSpec], layout: Layout?, tokenBands: [TokenBand] = []) {
         self.schemaVersion = schemaVersion
         self.id = id
         self.displayName = displayName
@@ -35,14 +36,29 @@ public struct ThemeManifest: Equatable, Sendable {
         self.tint = tint
         self.states = states
         self.layout = layout
+        self.tokenBands = tokenBands
     }
 }
 
-/// What one canonical state renders, plus an optional lifecycle sound.
+/// A token-usage tier. The theme declares an ordered list (ascending `upTo`); the engine derives the
+/// CURRENT band from the live token count and swaps in that band's visual where a state supplies one.
+/// `upTo` is an exclusive upper bound in tokens; the final band omits `upTo` (a catch-all for "and up").
+public struct TokenBand: Equatable, Sendable {
+    public let name: String
+    public let upTo: Int?      // exclusive upper bound; nil = catch-all (only valid on the last band)
+    public init(name: String, upTo: Int?) { self.name = name; self.upTo = upTo }
+}
+
+/// What one canonical state renders, plus an optional lifecycle sound. `visual` is the base/default;
+/// `visualBands` optionally overrides it per token band (band name → visual). The engine renders
+/// `visualBands[currentBand]` when present, else falls back to `visual`.
 public struct StateSpec: Equatable, Sendable {
     public let visual: Visual
     public let sound: SoundSpec?
-    public init(visual: Visual, sound: SoundSpec?) { self.visual = visual; self.sound = sound }
+    public let visualBands: [String: Visual]
+    public init(visual: Visual, sound: SoundSpec?, visualBands: [String: Visual] = [:]) {
+        self.visual = visual; self.sound = sound; self.visualBands = visualBands
+    }
 }
 
 /// The four visual kinds a state may render. Exactly one kind per state (the loader enforces it).
@@ -110,6 +126,24 @@ public enum SpriteClock {
         let advanced = (tick * fps) / tickHz           // how many sprite-frames have elapsed
         let m = advanced % frameCount
         return m >= 0 ? m : m + frameCount             // tolerate a negative tick defensively
+    }
+}
+
+/// Maps a live token count onto a theme's declared `tokenBands`. Pure + testable so the band the
+/// engine renders never drifts from what validation accepted. Bands are ascending by `upTo`
+/// (exclusive); the first band whose bound the count is BELOW wins; the final catch-all band
+/// (`upTo == nil`) covers everything above. A count past every finite bound clamps to the last band.
+public enum TokenBands {
+    /// The band name for `tokens`, or nil when no bands are declared. Negative tokens clamp to the
+    /// first band (an unknown/early count reads as the lowest tier).
+    public static func bandName(for tokens: Int, bands: [TokenBand]) -> String? {
+        guard let first = bands.first else { return nil }
+        if tokens < 0 { return first.name }
+        for band in bands {
+            guard let upTo = band.upTo else { return band.name }   // catch-all
+            if tokens < upTo { return band.name }
+        }
+        return bands.last?.name   // beyond every finite bound → clamp to the highest tier
     }
 }
 

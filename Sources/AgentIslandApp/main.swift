@@ -353,9 +353,14 @@ final class AppController: NSObject, NSMenuDelegate {
                     let reason = waitReason(s.status)
                     var parts: [String] = [skin.label]
                     if isWorking && s.steps > 0 { parts.append("\(s.steps) steps") }
-                    if !isFinished(s.status) && s.tokens > 0 { parts.append("\(TokenUsage.compact(s.tokens)) tok") }
-                    if !isFinished(s.status), let start = s.startedAt {
-                        parts.append(TranscriptClock.elapsedLabel(from: start, to: now))   // running time
+                    // Token usage + time sit next to the title on EVERY row (incl. finished/failed).
+                    if s.tokens > 0 { parts.append("\(TokenUsage.compact(s.tokens)) tok") }
+                    if let start = s.startedAt {
+                        if isFinished(s.status), let end = s.lastActivity {
+                            parts.append(TranscriptClock.durationLabel(max(0, end.timeIntervalSince(start))))  // total run time
+                        } else {
+                            parts.append(TranscriptClock.elapsedLabel(from: start, to: now))                   // running time
+                        }
                     }
                     var stateText = parts.joined(separator: " · ")
                     if reason == .permission { stateText = "❗ " + stateText }

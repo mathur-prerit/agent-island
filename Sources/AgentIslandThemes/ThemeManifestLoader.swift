@@ -22,6 +22,8 @@ public enum ThemeRejection: Error, Equatable, Sendable {
     case badColorRef(String)               // a colour ref that isn't hex/palette/system/clear
     case badSoundTrigger(String)           // sound.trigger not onEnter|loop
     case appTooOld(required: String)       // minAppVersion > the running app
+    case badTokenBands(String)             // malformed tokenBands (order, dup name, misplaced catch-all)
+    case unknownBand(String)               // a visualBands key not declared in tokenBands
     case asset(PackRejection)              // a path/type rejection from PackValidator (image or audio)
 
     /// Promote a `PackRejection` (path-safety / image allowlist) into a `ThemeRejection`.
@@ -36,7 +38,11 @@ public enum ThemeManifestLoader {
     /// Top-level keys a manifest may carry (strict — anything else is rejected).
     static let allowedTopLevelKeys: Set<String> =
         ["schemaVersion", "id", "displayName", "minAppVersion", "showsPersonaGlyph",
-         "palette", "tint", "states", "layout"]
+         "palette", "tint", "states", "layout", "tokenBands"]
+
+    /// Upper bound on declared token bands — generous for any sensible tiering, a backstop against a
+    /// hostile manifest declaring a runaway list.
+    static let maxTokenBands = 32
 
     /// Sprite sizing ceilings (untrusted) — generous for real pixel art, far below any overflow/DoS
     /// threshold. A frame cell of 4096² covers any sensible sheet; 1024 frames at 240fps is absurdly
@@ -114,6 +120,17 @@ public enum ThemeManifestLoader {
             tint = dict
         }
 
+        // --- tokenBands (optional): ordered usage tiers, ascending `upTo`; only the LAST is the
+        //     catch-all (`upTo` omitted). Parsed before states so `visualBands` keys can be checked. ---
+        var tokenBands: [TokenBand] = []
+        if let raw = root["tokenBands"] {
+            switch parseTokenBands(raw) {
+            case .failure(let r): return .failure(r)
+            case .success(let b): tokenBands = b
+            }
+        }
+        let bandNames = Set(tokenBands.map(\.name))
+
         // --- states (required) ---
         guard let statesRaw = root["states"] as? [String: Any] else {
             return .failure(root["states"] == nil ? .missingField("states") : .wrongType("states"))
@@ -122,10 +139,10 @@ public enum ThemeManifestLoader {
         for (state, specRaw) in statesRaw {
             guard ThemeStateID.all.contains(state) else { return .failure(.unknownState(state)) }
             guard let specDict = specRaw as? [String: Any] else { return .failure(.wrongType("states.\(state)")) }
-            for key in specDict.keys where key != "visual" && key != "sound" {
+            for key in specDict.keys where key != "visual" && key != "sound" && key != "visualBands" {
                 return .failure(.unknownField("states.\(state).\(key)"))
             }
-            switch parseStateSpec(specDict, state: state, palette: palette) {
+            switch parseStateSpec(specDict, state: state, palette: palette, bandNames: bandNames) {
             case .failure(let r): return .failure(r)
             case .success(let spec): states[state] = spec
             }
@@ -143,13 +160,57 @@ public enum ThemeManifestLoader {
         return .success(ThemeManifest(
             schemaVersion: schemaVersion, id: id, displayName: displayName,
             minAppVersion: minAppVersion, showsPersonaGlyph: showsPersonaGlyph,
-            palette: palette, tint: tint, states: states, layout: layout))
+            palette: palette, tint: tint, states: states, layout: layout, tokenBands: tokenBands))
+    }
+
+    // MARK: - Token bands
+
+    /// Parse + validate `tokenBands`: a non-empty array of `{ name, upTo? }`. Names must be unique;
+    /// `upTo` (when present) a positive int; the bounds STRICTLY ascending; and only the LAST band may
+    /// omit `upTo` (the catch-all). A missing `upTo` on any earlier band, or a non-ascending bound, is
+    /// rejected so the engine's first-match-wins scan is unambiguous.
+    private static func parseTokenBands(_ raw: Any) -> Result<[TokenBand], ThemeRejection> {
+        guard let arr = raw as? [Any] else { return .failure(.wrongType("tokenBands")) }
+        guard !arr.isEmpty else { return .failure(.badTokenBands("must list at least one band")) }
+        guard arr.count <= maxTokenBands else { return .failure(.badTokenBands("too many bands (max \(maxTokenBands))")) }
+        var bands: [TokenBand] = []
+        var seenNames = Set<String>()
+        var lastUpTo: Int? = nil
+        for (i, entry) in arr.enumerated() {
+            guard let dict = entry as? [String: Any] else { return .failure(.wrongType("tokenBands[\(i)]")) }
+            for key in dict.keys where key != "name" && key != "upTo" {
+                return .failure(.unknownField("tokenBands[\(i)].\(key)"))
+            }
+            guard let name = dict["name"] as? String, !name.isEmpty else {
+                return .failure(.badTokenBands("band[\(i)] needs a non-empty name"))
+            }
+            guard seenNames.insert(name).inserted else {
+                return .failure(.badTokenBands("duplicate band name '\(name)'"))
+            }
+            let isLast = (i == arr.count - 1)
+            if let upToRaw = dict["upTo"] {
+                guard let upTo = strictInt(upToRaw), upTo > 0 else {
+                    return .failure(.badTokenBands("band '\(name)' upTo must be a positive integer"))
+                }
+                if let prev = lastUpTo, upTo <= prev {
+                    return .failure(.badTokenBands("band '\(name)' upTo must be greater than the previous band"))
+                }
+                lastUpTo = upTo
+                bands.append(TokenBand(name: name, upTo: upTo))
+            } else {
+                // Only the final band may be the catch-all (no upTo).
+                guard isLast else { return .failure(.badTokenBands("only the last band may omit upTo (band '\(name)')")) }
+                bands.append(TokenBand(name: name, upTo: nil))
+            }
+        }
+        return .success(bands)
     }
 
     // MARK: - State / visual / sound
 
     private static func parseStateSpec(_ dict: [String: Any], state: String,
-                                       palette: [String: String]) -> Result<StateSpec, ThemeRejection> {
+                                       palette: [String: String],
+                                       bandNames: Set<String>) -> Result<StateSpec, ThemeRejection> {
         guard let visualRaw = dict["visual"] as? [String: Any] else {
             return .failure(dict["visual"] == nil ? .missingField("states.\(state).visual")
                                                    : .wrongType("states.\(state).visual"))
@@ -167,7 +228,27 @@ public enum ThemeManifestLoader {
             case .success(let s): sound = s
             }
         }
-        return .success(StateSpec(visual: visual, sound: sound))
+
+        // visualBands (optional): per-band visual overrides. Each key MUST be a declared tokenBand
+        // (so a typo or a banded state with no `tokenBands` is rejected, never silently ignored); each
+        // value is a full visual, validated like the base `visual`.
+        var visualBands: [String: Visual] = [:]
+        if let bandsRaw = dict["visualBands"] {
+            guard let bandsDict = bandsRaw as? [String: Any] else {
+                return .failure(.wrongType("states.\(state).visualBands"))
+            }
+            for (bandName, bvRaw) in bandsDict {
+                guard bandNames.contains(bandName) else { return .failure(.unknownBand(bandName)) }
+                guard let bvDict = bvRaw as? [String: Any] else {
+                    return .failure(.wrongType("states.\(state).visualBands.\(bandName)"))
+                }
+                switch parseVisual(bvDict, state: "\(state).visualBands.\(bandName)", palette: palette) {
+                case .failure(let r): return .failure(r)
+                case .success(let v): visualBands[bandName] = v
+                }
+            }
+        }
+        return .success(StateSpec(visual: visual, sound: sound, visualBands: visualBands))
     }
 
     /// Allowed keys per `visual.kind` (strict — an unknown key inside a visual is rejected).
