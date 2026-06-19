@@ -381,7 +381,8 @@ final class AppController: NSObject, NSMenuDelegate {
                                            spinning: isWorking,
                                            dimmed: !isWorking,  // only the running row stays bright
                                            waitReason: reason, verdict: verdict(s.status),
-                                           tokens: s.tokens, subRows: subRows, detail: detail)
+                                           tokens: s.tokens, subRows: subRows, detail: detail,
+                                           startedAt: s.startedAt)
                 }
             }
             island.update(rows: rows)
