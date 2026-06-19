@@ -237,10 +237,17 @@ final class IslandPanel: NSPanel {
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.tertiaryLabelColor]
         if expanded {
-            // Expanded: the "agent-island" wordmark beside the logo, in full label colour.
+            // Expanded: the "agent-island" wordmark beside the logo, in full label colour, with the
+            // aggregate token usage across the shown sessions trailing it (quieter) — a glanceable total.
             let s = NSMutableAttributedString(string: "agent-island", attributes: [
                 .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
                 .foregroundColor: NSColor.labelColor])
+            let totalTokens = lastRows.filter { $0.id != "idle" }.reduce(0) { $0 + $1.tokens }
+            if totalTokens > 0 {
+                s.append(NSAttributedString(string: "  ·  \(TokenUsage.compact(totalTokens)) tok", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+            }
             s.append(NSAttributedString(string: "  \(chevron)", attributes: chevronAttrs))
             return s
         }
