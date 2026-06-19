@@ -413,6 +413,14 @@ check(DefaultSoundSet.clipName(for: .enteredFinished(.failed)) == "finished_fail
 check(DefaultSoundSet.clipName(for: .enteredFinished(.unknown)) == nil,
       "default set: finished(unknown) -> nil (silent, matching the theme)")
 
+// Per-cue mute keys (the Sound menu's per-cue toggles + the play gate speak this vocabulary).
+check(SoundTransition.startedWorking.muteKey == "start", "mute key: startedWorking -> start")
+check(SoundTransition.enteredWaiting(.permission).muteKey == "waiting"
+      && SoundTransition.enteredWaiting(.stoppedTurn).muteKey == "waiting", "mute key: waiting (both reasons)")
+check(SoundTransition.enteredFinished(.success).muteKey == "finished", "mute key: finished(success) -> finished")
+check(SoundTransition.enteredFinished(.failed).muteKey == "failed", "mute key: finished(failed) -> failed")
+check(SoundTransition.enteredFinished(.unknown).muteKey == nil, "mute key: finished(unknown) -> nil (no mutable cue)")
+
 let throttleBase = Date(timeIntervalSince1970: 1_700_000_000)
 check(PlayThrottle.allows(now: throttleBase, last: .distantPast, cooldown: 1.0), "throttle: first play allowed")
 check(!PlayThrottle.allows(now: throttleBase.addingTimeInterval(0.5), last: throttleBase, cooldown: 1.0), "throttle: within cooldown blocked")
@@ -1219,13 +1227,19 @@ check(CommandParser.parse(["daemon", "restart"]) == .daemon(.restart), "cli-pars
 check(CommandParser.parse(["daemon", "--restart"]) == .daemon(.restart), "cli-parse: daemon --restart (flag alias)")
 check({ if case .usageError = CommandParser.parse(["daemon", "frob"]) { return true }; return false }(),
       "cli-parse: daemon bad verb -> usageError")
+check(CommandParser.parse(["restart"]) == .restart, "cli-parse: restart (whole app + daemon)")
+check(CommandParser.parse(["stop"]) == .stop, "cli-parse: stop (whole app + daemon)")
+check({ if case .usageError = CommandParser.parse(["restart", "now"]) { return true }; return false }(),
+      "cli-parse: restart with extra arg -> usageError")
+check({ if case .usageError = CommandParser.parse(["stop", "please"]) { return true }; return false }(),
+      "cli-parse: stop with extra arg -> usageError")
 check({ if case .unknown(let t) = CommandParser.parse(["frobnicate"]) { return t == "frobnicate" }; return false }(),
       "cli-parse: unknown top-level command")
 
 // Help/usage surface mentions every subcommand (so README and --help can't silently drift apart).
 let usage = Help.usage
 for token in ["theme list", "theme add", "theme set", "config", "config get", "config set",
-              "update", "start-on-boot", "uninstall", "version"] {
+              "update", "start-on-boot", "daemon", "restart", "stop", "uninstall", "version"] {
     check(usage.contains(token), "cli-help: usage mentions '\(token)'")
 }
 

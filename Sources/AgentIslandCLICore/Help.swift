@@ -24,6 +24,8 @@ public enum Help {
           update                     Check for a newer release; offer to update in place
           start-on-boot [on|off|status]  Launch agent-island at login (login item; default: status)
           daemon [status|stop|restart]   Inspect / kill a dangling agentislandd, or kill + respawn it
+          restart                    Restart all of agent-island — the menu-bar app AND the daemon
+          stop                       Stop all of agent-island — quit the menu-bar app AND the daemon
           uninstall [--yes] [--dry-run] [--purge]  Remove hooks, login item, the app + ~/.agent-island
                                      (KEEPS your custom themes by default; --purge wipes those too)
           version                    Print the CLI version

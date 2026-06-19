@@ -61,14 +61,15 @@ final class IslandPanel: NSPanel {
         let spinning: Bool; let dimmed: Bool
         let waitReason: WaitReason?; let verdict: Verdict?; let tokens: Int; let subRows: [SubRow]
         let detail: String?   // expanded-only session line (e.g. "📂 project"); also makes the row expandable
+        let startedAt: Date?  // session start — lets the header show aggregate running time
         init(id: String, glyph: String, color: NSColor, title: String, state: String,
              spinning: Bool = false, dimmed: Bool = false,
              waitReason: WaitReason? = nil, verdict: Verdict? = nil, tokens: Int = 0,
-             subRows: [SubRow] = [], detail: String? = nil) {
+             subRows: [SubRow] = [], detail: String? = nil, startedAt: Date? = nil) {
             self.id = id; self.glyph = glyph; self.color = color; self.title = title; self.state = state
             self.spinning = spinning; self.dimmed = dimmed
             self.waitReason = waitReason; self.verdict = verdict; self.tokens = tokens; self.subRows = subRows
-            self.detail = detail
+            self.detail = detail; self.startedAt = startedAt
         }
     }
 
@@ -237,10 +238,25 @@ final class IslandPanel: NSPanel {
             .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.tertiaryLabelColor]
         if expanded {
-            // Expanded: the "agent-island" wordmark beside the logo, in full label colour.
+            // Expanded: the "agent-island" wordmark beside the logo, in full label colour, with the
+            // aggregate token usage across the shown sessions trailing it (quieter) — a glanceable total.
             let s = NSMutableAttributedString(string: "agent-island", attributes: [
                 .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
                 .foregroundColor: NSColor.labelColor])
+            // Trailing meta (quieter): aggregate token usage + how long agents have been running
+            // (elapsed since the earliest still-active session started).
+            var meta: [String] = []
+            let totalTokens = lastRows.filter { $0.id != "idle" }.reduce(0) { $0 + $1.tokens }
+            if totalTokens > 0 { meta.append("\(TokenUsage.compact(totalTokens)) tok") }
+            let activeStarts = lastRows.filter { $0.spinning || $0.waitReason != nil }.compactMap(\.startedAt)
+            if let earliest = activeStarts.min() {
+                meta.append(TranscriptClock.elapsedLabel(from: earliest, to: Date()))
+            }
+            if !meta.isEmpty {
+                s.append(NSAttributedString(string: "  ·  " + meta.joined(separator: " · "), attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+            }
             s.append(NSAttributedString(string: "  \(chevron)", attributes: chevronAttrs))
             return s
         }
