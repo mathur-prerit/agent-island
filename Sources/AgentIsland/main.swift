@@ -53,6 +53,12 @@ case .startOnBoot(let action):
 case .daemon(let action):
     exit(DaemonCommand.run(action) ? 0 : 1)
 
+case .restart:
+    exit(AppLifecycle.restart() ? 0 : 1)
+
+case .stop:
+    exit(AppLifecycle.stop() ? 0 : 1)
+
 case .unknown(let token):
     errOut("agentisland: unknown command '\(token)'")
     errOut("")

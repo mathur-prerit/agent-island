@@ -1219,13 +1219,19 @@ check(CommandParser.parse(["daemon", "restart"]) == .daemon(.restart), "cli-pars
 check(CommandParser.parse(["daemon", "--restart"]) == .daemon(.restart), "cli-parse: daemon --restart (flag alias)")
 check({ if case .usageError = CommandParser.parse(["daemon", "frob"]) { return true }; return false }(),
       "cli-parse: daemon bad verb -> usageError")
+check(CommandParser.parse(["restart"]) == .restart, "cli-parse: restart (whole app + daemon)")
+check(CommandParser.parse(["stop"]) == .stop, "cli-parse: stop (whole app + daemon)")
+check({ if case .usageError = CommandParser.parse(["restart", "now"]) { return true }; return false }(),
+      "cli-parse: restart with extra arg -> usageError")
+check({ if case .usageError = CommandParser.parse(["stop", "please"]) { return true }; return false }(),
+      "cli-parse: stop with extra arg -> usageError")
 check({ if case .unknown(let t) = CommandParser.parse(["frobnicate"]) { return t == "frobnicate" }; return false }(),
       "cli-parse: unknown top-level command")
 
 // Help/usage surface mentions every subcommand (so README and --help can't silently drift apart).
 let usage = Help.usage
 for token in ["theme list", "theme add", "theme set", "config", "config get", "config set",
-              "update", "start-on-boot", "uninstall", "version"] {
+              "update", "start-on-boot", "daemon", "restart", "stop", "uninstall", "version"] {
     check(usage.contains(token), "cli-help: usage mentions '\(token)'")
 }
 

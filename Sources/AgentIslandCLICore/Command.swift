@@ -20,6 +20,8 @@ public enum Command: Equatable {
     case uninstall(yes: Bool, dryRun: Bool, purge: Bool)  // `uninstall [--yes] [--dry-run] [--purge]`
     case startOnBoot(StartOnBootAction)         // `start-on-boot [on|off|status]`
     case daemon(DaemonAction)                   // `daemon [status|stop|restart]`
+    case restart                                // `restart` — relaunch the whole app (GUI + daemon)
+    case stop                                   // `stop` — quit the whole app (GUI + daemon)
     case unknown(String)                        // an unrecognized first token
     case usageError(String)                     // a recognized command with the wrong/missing args
 }
@@ -61,6 +63,10 @@ public enum CommandParser {
             return parseStartOnBoot(rest)
         case "daemon":
             return parseDaemon(rest)
+        case "restart":
+            return rest.isEmpty ? .restart : .usageError("restart takes no arguments")
+        case "stop":
+            return rest.isEmpty ? .stop : .usageError("stop takes no arguments")
         default:
             return .unknown(first)
         }
