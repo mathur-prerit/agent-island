@@ -413,6 +413,14 @@ check(DefaultSoundSet.clipName(for: .enteredFinished(.failed)) == "finished_fail
 check(DefaultSoundSet.clipName(for: .enteredFinished(.unknown)) == nil,
       "default set: finished(unknown) -> nil (silent, matching the theme)")
 
+// Per-cue mute keys (the Sound menu's per-cue toggles + the play gate speak this vocabulary).
+check(SoundTransition.startedWorking.muteKey == "start", "mute key: startedWorking -> start")
+check(SoundTransition.enteredWaiting(.permission).muteKey == "waiting"
+      && SoundTransition.enteredWaiting(.stoppedTurn).muteKey == "waiting", "mute key: waiting (both reasons)")
+check(SoundTransition.enteredFinished(.success).muteKey == "finished", "mute key: finished(success) -> finished")
+check(SoundTransition.enteredFinished(.failed).muteKey == "failed", "mute key: finished(failed) -> failed")
+check(SoundTransition.enteredFinished(.unknown).muteKey == nil, "mute key: finished(unknown) -> nil (no mutable cue)")
+
 let throttleBase = Date(timeIntervalSince1970: 1_700_000_000)
 check(PlayThrottle.allows(now: throttleBase, last: .distantPast, cooldown: 1.0), "throttle: first play allowed")
 check(!PlayThrottle.allows(now: throttleBase.addingTimeInterval(0.5), last: throttleBase, cooldown: 1.0), "throttle: within cooldown blocked")

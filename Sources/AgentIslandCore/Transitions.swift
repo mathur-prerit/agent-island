@@ -7,6 +7,19 @@ public enum SoundTransition: Equatable, Sendable {
     case startedWorking                // → working from a non-working / first-seen state
     case enteredWaiting(WaitReason)    // → waiting-for-user-input (your turn) from a non-waiting state
     case enteredFinished(Verdict)      // → finished(success/failed/unknown)
+
+    /// Coarse, user-facing cue key for per-cue muting in the Sound menu (start / waiting / finished /
+    /// failed). `nil` = no user-mutable cue for this transition (the silent `.unknown` verdict). Pure +
+    /// pinned by the self-test so the menu toggles and the play gate speak the same vocabulary.
+    public var muteKey: String? {
+        switch self {
+        case .startedWorking:            return "start"
+        case .enteredWaiting:            return "waiting"
+        case .enteredFinished(.success): return "finished"
+        case .enteredFinished(.failed):  return "failed"
+        case .enteredFinished(.unknown): return nil
+        }
+    }
 }
 
 /// Detects the sound-worthy transition (if any) between two consecutive observations of a session.

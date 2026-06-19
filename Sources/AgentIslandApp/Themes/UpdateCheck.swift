@@ -51,6 +51,21 @@ enum UpdateCheck {
         }
     }
 
+    /// Force a check NOW, ignoring the daily throttle — the manual "Check for updates…" menu action.
+    /// Ignores any prior dismissal (the user explicitly asked, so report the true latest) and always
+    /// delivers a decision on the main queue. Still stamps the throttle timestamp so the next automatic
+    /// check waits a day.
+    static func checkNow(installed: String = AppInfo.version,
+                         defaults: UserDefaults = .standard,
+                         completion: @escaping (UpdateAvailability) -> Void) {
+        defaults.set(Date(), forKey: lastCheckKey)
+        DispatchQueue.global(qos: .utility).async {
+            let latest = fetchLatestTag()
+            let availability = UpdateAvailability.decide(installed: installed, latest: latest, dismissed: nil)
+            DispatchQueue.main.async { completion(availability) }
+        }
+    }
+
     /// Record that the user dismissed an offered version, so the badge stays quiet until something
     /// strictly newer ships (the pure `decide` compares against this).
     static func dismiss(version: String, defaults: UserDefaults = .standard) {

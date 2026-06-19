@@ -229,24 +229,34 @@ final class AppController: NSObject, NSMenuDelegate {
         themeItem.submenu = themeMenu
         menu.addItem(themeItem)
 
-        // Quiet by default: themes opt into lifecycle sound cues (today only Road Runner's arcade set);
-        // the neutral default set fills in for silent themes (or replaces the theme set entirely).
-        let soundToggle = NSMenuItem(title: "Sound cues", action: #selector(toggleSound), keyEquivalent: "")
-        soundToggle.target = self; soundToggle.isEnabled = true
-        soundToggle.state = SoundManager.shared.isEnabled ? .on : .off
-        menu.addItem(soundToggle)
-
-        let soundSetItem = NSMenuItem(title: "Sound set", action: nil, keyEquivalent: "")
-        let soundSetMenu = NSMenu()
+        // Sound submenu: a master toggle, per-cue mute (start / waiting / finished / failed), and the
+        // cue set. Quiet by default — themes opt into lifecycle cues; the neutral default set fills in
+        // for silent themes (or replaces the theme set entirely). Per-cue flags only SUBTRACT from the
+        // master (each defaults on), so toggling Sound cues on still gives the full set.
+        let soundItem = NSMenuItem(title: "Sound", action: nil, keyEquivalent: "")
+        let soundMenu = NSMenu()
+        let soundsOn = SoundManager.shared.isEnabled
+        let master = NSMenuItem(title: "Sound cues", action: #selector(toggleSound), keyEquivalent: "")
+        master.target = self; master.state = soundsOn ? .on : .off
+        soundMenu.addItem(master)
+        soundMenu.addItem(.separator())
+        for (key, label) in [("start", "Start"), ("waiting", "Waiting"), ("finished", "Finished"), ("failed", "Failed")] {
+            let ci = NSMenuItem(title: label, action: #selector(toggleSoundCue(_:)), keyEquivalent: "")
+            ci.target = self; ci.representedObject = key
+            ci.state = soundCueEnabled(key) ? .on : .off
+            ci.isEnabled = soundsOn   // grey the per-cue toggles out when the master is off
+            soundMenu.addItem(ci)
+        }
+        soundMenu.addItem(.separator())
         let activeSet = currentSoundSet
         for (id, label) in [("theme", "Theme set"), ("default", "Default set")] {
             let si = NSMenuItem(title: label, action: #selector(pickSoundSet(_:)), keyEquivalent: "")
             si.target = self; si.representedObject = id; si.state = (id == activeSet) ? .on : .off
             si.isEnabled = true   // always pickable; the choice just takes effect once cues are on
-            soundSetMenu.addItem(si)
+            soundMenu.addItem(si)
         }
-        soundSetItem.submenu = soundSetMenu
-        menu.addItem(soundSetItem)
+        soundItem.submenu = soundMenu
+        menu.addItem(soundItem)
 
         // Opt-in: prevent OS idle system-sleep while an agent is working (good battery citizen —
         // only asserts when ON and something is actually working; see updateSleepAssertion).
@@ -270,6 +280,11 @@ final class AppController: NSObject, NSMenuDelegate {
         let reset = NSMenuItem(title: "Reset island position", action: #selector(resetIslandPosition), keyEquivalent: "")
         reset.target = self; reset.isEnabled = true
         menu.addItem(reset)
+
+        // Manual update check (the automatic one is daily-throttled; this forces it now).
+        let checkUpdate = NSMenuItem(title: "Check for updates…", action: #selector(checkForUpdatesNow), keyEquivalent: "")
+        checkUpdate.target = self; checkUpdate.isEnabled = true
+        menu.addItem(checkUpdate)
 
         // Version footer (dim, disabled). Shows the installed version; appends "→ vX update" when the
         // daily check found a newer release, so the version line doubles as a subtle update hint.
@@ -527,6 +542,47 @@ final class AppController: NSObject, NSMenuDelegate {
         refresh()
     }
 
+    static let soundCueKeyPrefix = "soundCue."   // per-cue mute flags in the app's defaults (default on)
+
+    /// Whether a specific lifecycle cue (start/waiting/finished/failed) is enabled. Default ON when
+    /// unset, so the master toggle alone yields the full set; the per-cue flags only subtract.
+    private func soundCueEnabled(_ key: String) -> Bool {
+        let k = AppController.soundCueKeyPrefix + key
+        if UserDefaults.standard.object(forKey: k) == nil { return true }
+        return UserDefaults.standard.bool(forKey: k)
+    }
+
+    @objc private func toggleSoundCue(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(!soundCueEnabled(key), forKey: AppController.soundCueKeyPrefix + key)
+        refresh()
+    }
+
+    /// Manual "Check for updates…": force a check now (ignores the daily throttle), update the badge,
+    /// and report the result inline (the menu has closed by now, so feedback is an alert).
+    @objc private func checkForUpdatesNow() {
+        UpdateCheck.checkNow { [weak self] availability in
+            guard let self else { return }
+            self.updateAvailable = availability
+            self.refresh()
+            let alert = NSAlert()
+            if let v = availability.offeredVersion {
+                alert.messageText = "Update available: v\(v)"
+                alert.informativeText = "You're on v\(AppInfo.version). Open the releases page to update?"
+                alert.addButton(withTitle: "Get update…")
+                alert.addButton(withTitle: "Later")
+                if alert.runModal() == .alertFirstButtonReturn, let url = URL(string: UpdateCheck.releasesPageURL) {
+                    NSWorkspace.shared.open(url)
+                }
+            } else {
+                alert.messageText = "You're up to date"
+                alert.informativeText = "agent-island v\(AppInfo.version) is the latest release."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
     @objc private func toggleKeepAwake() {
         UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: keepAwakeKey), forKey: keepAwakeKey)
         refresh()
@@ -636,12 +692,16 @@ final class AppController: NSObject, NSMenuDelegate {
         let useDefaultSet = (currentSoundSet == "default")
         for s in sessions {
             if let transition = TransitionDetector.transition(from: lastStatus[s.fullID], to: s.status) {
-                // "default" set always plays the neutral cues; "theme" set prefers the theme's own
-                // jingle and falls back to the neutral cue so silent themes (Minimal) still cue.
-                let url = useDefaultSet
-                    ? DefaultSounds.url(for: transition)
-                    : (theme.sound(for: transition) ?? DefaultSounds.url(for: transition))
-                SoundManager.shared.play(url)
+                // Per-cue mute (start / waiting / finished / failed) subtracts from the master toggle.
+                let muted = transition.muteKey.map { !soundCueEnabled($0) } ?? false
+                if !muted {
+                    // "default" set always plays the neutral cues; "theme" set prefers the theme's own
+                    // jingle and falls back to the neutral cue so silent themes (Minimal) still cue.
+                    let url = useDefaultSet
+                        ? DefaultSounds.url(for: transition)
+                        : (theme.sound(for: transition) ?? DefaultSounds.url(for: transition))
+                    SoundManager.shared.play(url)
+                }
             }
             lastStatus[s.fullID] = s.status
         }
