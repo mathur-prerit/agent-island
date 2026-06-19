@@ -14,7 +14,7 @@ import AgentIslandThemes
 /// source of truth). The `"0.3.0"` fallback is what a bare `swift run AgentIslandApp` (no bundle plist)
 /// reports — keep it in lockstep with that `VERSION`.
 enum AppInfo {
-    static let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.4.0"
+    static let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.4.1"
 }
 
 enum ManifestThemeDiscovery {
