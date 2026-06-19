@@ -771,6 +771,67 @@ check(ColorRefSyntax.isValid("system:teal", palette: [:]) && ColorRefSyntax.isVa
       && !ColorRefSyntax.isValid("system:bogus", palette: [:]),
       "colour: system name validated against the shared resolver allowlist")
 
+// --- Token bands: pure selection + manifest decode/validation (config-based usage tiers) ---
+let demoBands: [TokenBand] = [
+    TokenBand(name: "rookie", upTo: 50_000),
+    TokenBand(name: "super",  upTo: 100_000),
+    TokenBand(name: "fire",   upTo: 200_000),
+    TokenBand(name: "star",   upTo: nil),
+]
+check(TokenBands.bandName(for: 0, bands: demoBands) == "rookie", "token bands: 0 -> rookie")
+check(TokenBands.bandName(for: 49_999, bands: demoBands) == "rookie", "token bands: just below first bound -> rookie")
+check(TokenBands.bandName(for: 50_000, bands: demoBands) == "super", "token bands: at the bound crosses up (upTo exclusive)")
+check(TokenBands.bandName(for: 150_000, bands: demoBands) == "fire", "token bands: mid-range -> fire")
+check(TokenBands.bandName(for: 5_000_000, bands: demoBands) == "star", "token bands: beyond all finite bounds -> catch-all star")
+check(TokenBands.bandName(for: -100, bands: demoBands) == "rookie", "token bands: negative clamps to the first band")
+check(TokenBands.bandName(for: 10, bands: []) == nil, "token bands: no bands declared -> nil")
+check(TokenBands.bandName(for: 999_999, bands: [TokenBand(name: "a", upTo: 10), TokenBand(name: "b", upTo: 20)]) == "b",
+      "token bands: count past every finite bound clamps to the last band")
+
+let bandedManifest = """
+{
+  "schemaVersion": 1, "id": "critter", "displayName": "x",
+  "tokenBands": [ {"name":"rookie","upTo":50000}, {"name":"super","upTo":100000}, {"name":"star"} ],
+  "states": {
+    "working": {
+      "visual": { "kind": "sprite", "sheet": "sprites/small.png", "frameWidth": 24, "frameHeight": 24, "frameCount": 4, "fps": 8 },
+      "visualBands": {
+        "super": { "kind": "sprite", "sheet": "sprites/super.png", "frameWidth": 24, "frameHeight": 24, "frameCount": 4, "fps": 8 },
+        "star":  { "kind": "image", "file": "images/star.png" }
+      }
+    }
+  }
+}
+"""
+if case .success(let m) = loadTheme(bandedManifest) {
+    check(m.tokenBands.map(\.name) == ["rookie", "super", "star"] && m.tokenBands[2].upTo == nil,
+          "token bands: declared bands decode in order, last is the catch-all")
+    check(m.states["working"]?.visual == .sprite(sheet: "sprites/small.png", frameWidth: 24, frameHeight: 24, frameCount: 4, fps: 8),
+          "token bands: base visual still decodes alongside visualBands")
+    check(m.states["working"]?.visualBands["super"] == .sprite(sheet: "sprites/super.png", frameWidth: 24, frameHeight: 24, frameCount: 4, fps: 8)
+          && m.states["working"]?.visualBands["star"] == .image(file: "images/star.png"),
+          "token bands: per-band visual overrides decode")
+} else {
+    check(false, "token bands: a valid banded manifest must load")
+}
+// A theme with no tokenBands keeps an empty band list (backward compatible — the existing validManifest above).
+if case .success(let m) = loadTheme(validManifest) {
+    check(m.tokenBands.isEmpty && (m.states["working"]?.visualBands.isEmpty ?? false),
+          "token bands: a manifest without bands decodes to empty (backward compatible)")
+}
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tokenBands":[],"states":{}}"#,
+        .badTokenBands("must list at least one band"), "token bands: empty list rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tokenBands":[{"name":"a","upTo":100},{"name":"b","upTo":50}],"states":{}}"#,
+        .badTokenBands("band 'b' upTo must be greater than the previous band"), "token bands: non-ascending upTo rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tokenBands":[{"name":"a","upTo":100},{"name":"a"}],"states":{}}"#,
+        .badTokenBands("duplicate band name 'a'"), "token bands: duplicate band name rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tokenBands":[{"name":"a"},{"name":"b","upTo":100}],"states":{}}"#,
+        .badTokenBands("only the last band may omit upTo (band 'a')"), "token bands: non-last catch-all rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","tokenBands":[{"name":"a","upTo":50},{"name":"b"}],"states":{"working":{"visual":{"kind":"text","string":"x"},"visualBands":{"ghost":{"kind":"text","string":"y"}}}}}"#,
+        .unknownBand("ghost"), "token bands: visualBands key not in tokenBands rejected")
+rejects(#"{"schemaVersion":1,"id":"critter","displayName":"x","states":{"working":{"visual":{"kind":"text","string":"x"},"visualBands":{"super":{"kind":"text","string":"y"}}}}}"#,
+        .unknownBand("super"), "token bands: visualBands with no tokenBands declared rejected")
+
 // --- Theme catalog: strict decode of the hosted download index ---
 let validCatalog = """
 {

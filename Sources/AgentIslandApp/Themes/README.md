@@ -79,12 +79,21 @@ waits for you) / goal (success) / game-over (failure).
     "working": "accent",              //   palette name | hex | "system:teal" | "clear"
     "waitingPermission": "system:orange"
   },
+  "tokenBands": [                     // optional usage tiers; engine tracks the LIVE token count
+    { "name": "rookie", "upTo": 50000 },   //   ascending, EXCLUSIVE upper bound
+    { "name": "super",  "upTo": 100000 },
+    { "name": "star" }                //   last band omits upTo (the "and up" catch-all)
+  ],
   "states": {                         // required; keys are canonical state ids (see below)
     "working": {
-      "visual": {                     // exactly one "kind"
+      "visual": {                     // exactly one "kind" — the BASE/default visual
         "kind": "sprite",             //   "image" | "sprite" | "text" | "symbol"
         "sheet": "sprites/run.png",   //   relative path (no "..", no absolute, allowlisted ext)
         "frameWidth": 32, "frameHeight": 32, "frameCount": 6, "fps": 12
+      },
+      "visualBands": {                // optional: override the visual per token band (name → visual)
+        "super": { "kind": "sprite", "sheet": "sprites/run_super.png", "frameWidth": 32, "frameHeight": 32, "frameCount": 6, "fps": 12 },
+        "star":  { "kind": "sprite", "sheet": "sprites/run_star.png",  "frameWidth": 32, "frameHeight": 32, "frameCount": 6, "fps": 12 }
       },
       "sound": { "file": "sounds/jump.wav", "trigger": "onEnter", "volume": 0.6 }
     },
@@ -110,6 +119,15 @@ waits for you) / goal (success) / game-over (failure).
   (`label secondaryLabel tertiaryLabel quaternaryLabel`). An unknown name is rejected at load.
 - **`sound.trigger`**: `onEnter` (fire once when the state begins) | `loop`. `volume` 0–1.
 - **Colour refs**: `#RRGGBB[AA]` · a `palette` name · `system:<name>` (an `NSColor.system*`) · `clear`.
+- **`tokenBands`** (optional): config-based usage tiers. An ordered list of `{ name, upTo }`; `upTo` is
+  an **exclusive** upper bound in tokens, **strictly ascending**; only the **last** band omits `upTo`
+  (the catch-all for "and up"). The engine derives the current band from the row's **live token
+  count** automatically — no per-theme code. Names must be unique; max 32 bands.
+- **`visualBands`** (optional, per state): a map `bandName → visual` that **overrides** the state's
+  base `visual` when the session is in that band. Every key must be a declared `tokenBands` name (a
+  typo, or a `visualBands` with no `tokenBands`, is rejected). Bands a state doesn't list fall back to
+  its base `visual`. This is how a theme "powers up" with usage (e.g. Mario small→super→star) while
+  staying pure config + `theme add`-installable.
 
 ## Asset & path rules
 
