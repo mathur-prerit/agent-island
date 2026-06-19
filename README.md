@@ -219,6 +219,16 @@ Your custom local themes are **kept on `agentisland uninstall`** (they're only r
 
 To publish for others, host the zip over https and (optionally) add an entry to the themes catalog so it appears in everyone's **Download more** submenu. The **full, authoritative spec** — every field, the sprite/colour rules, sound triggers, and the code-theme contract — lives in [`Sources/AgentIslandApp/Themes/README.md`](Sources/AgentIslandApp/Themes/README.md).
 
+### Community themes
+
+Browse ready-made themes — or publish your own — at **[awesome-agent-island](https://github.com/mathur-prerit/awesome-agent-island)**, a community collection plus a small **theme-authoring framework** (a dependency-free pixel-art engine + chiptune synth, a spec format, and an agent playbook) that generates a validated theme from a plain-language description. Themes there install with one command, e.g.:
+
+```sh
+agentisland theme add https://raw.githubusercontent.com/mathur-prerit/awesome-agent-island/main/themes/mario.zip
+```
+
+**Token-aware themes (0.4.0+).** A data theme can now react to **live token usage** with no per-theme code: declare ordered `tokenBands` and give any state per-band `visualBands` overrides, and the engine swaps the visual as a session climbs bands. The collection's **Super Mario** theme uses this to power Mario up (rookie → super → fire → star) as tokens burn. Schema: [`Themes/README.md`](Sources/AgentIslandApp/Themes/README.md).
+
 ## How it works
 
 No Claude Code hook cleanly separates "waiting for input" from "finished" (`Stop` fires for both). agent-island derives state from the session transcript: it reads the **last conversational record** (skipping metadata records like `ai-title` / `permission-mode`), where a trailing assistant `tool_use` block means *working* and a stopped turn means *waiting for you*; an open permission prompt is an explicit block; `SessionEnd` / quit / staleness means *finished*. Sub-agents are read from `<session-uuid>/subagents/**/agent-*.jsonl`. All of this was verified against real `~/.claude` transcripts — see [`spike/FINDINGS.md`](spike/FINDINGS.md).
@@ -261,7 +271,7 @@ Handy while developing:
 
 - **Feature requests & ideas** — open a [GitHub issue](https://github.com/mathur-prerit/agent-island/issues/new). Describe the outcome you want and the use case (that helps more than a proposed implementation); tag it a feature request. 👍 existing issues you care about so priorities are visible.
 - **Bug reports** — open an issue with: what you did, what you expected, what happened, your macOS + Swift version (`swift --version`), and any relevant output from Console.app or a crash report (`~/Library/Logs/DiagnosticReports/AgentIslandApp-*.ips`).
-- **Themes** — community data themes are welcome; see [Creating a theme](#creating-a-theme).
+- **Themes** — community data themes are welcome; see [Creating a theme](#creating-a-theme) and the [awesome-agent-island](https://github.com/mathur-prerit/awesome-agent-island) collection + authoring framework.
 - **Pull requests** — keep changes focused and follow the existing patterns; make sure `swift run AgentIslandSelfTest` stays green and add checks for new behavior. More in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
